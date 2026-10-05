@@ -1,15 +1,64 @@
-# Kioku — a private AI secretary whose memory grows
+# Kioku × PayPal — an AI secretary that bills your customers, checked against PayPal
 
-**Kioku** (記憶, "memory") is a personal AI secretary for one person. It keeps a memory that grows the way a good
-assistant's understanding grows — day → week → month → topic notes — and it follows rules that are enforced **in code,
-outside the model**, with a receipt for every decision.
+**Kioku** (記憶, "memory") is a private AI secretary for one small-business owner. It remembers through the owner's own
+notes — and it now handles the money side of a small shop with **PayPal**: it bills customers from a sentence in the
+chat, reminds them, records cash and bank transfers, and tells the owner who still owes what. Billing, reminding and
+recording each **wait for the owner's approval** before they run in PayPal.
 
-It runs on **NVIDIA Nemotron** open models through **Nebius Token Factory**, and it is small enough to run on a free
-512 MB host: the whole app is standard-library Python (no dependencies).
+Agents are good at sounding sure. "Café Hana has paid" or "I've recorded the payment" is easy for a model to say and
+costly when it is wrong. In Kioku **PayPal is the record**: a question about who owes what is answered from PayPal, and
+whatever the model says about money is checked against PayPal before the owner reads it.
 
-- **Live demo: https://kioku-demo.onrender.com** (free host, kept awake until the judging ends on 2026-12-15; if it
-  was asleep, the first visit can take up to a minute) · **Video (2:37): https://youtu.be/5eRbULrrlyU**
-- Track: Personal AI · License: MIT
+- Built with: **PayPal Invoicing v2 REST API** (sandbox) · **NVIDIA Nemotron** on **Nebius Token Factory** ·
+  **AG Grid Community** · hosted on **Render** · standard-library Python, no dependencies · License: MIT
+- Kioku was first built (2026-10-04/05) for the Nebius × NVIDIA Personal AI hackathon — memory, guard and receipts.
+  Everything about money and PayPal below was added during the PayPal AI Hackathon.
+
+---
+
+## PayPal in Kioku
+
+| The owner says | The model calls | After the owner approves, Kioku calls PayPal |
+|---|---|---|
+| "Bill Café Hana for 40 baguettes at ¥320 and 6 country loaves at ¥680" | `create_invoice` (customer by name, items) | `POST /v2/invoicing/invoices` + `/send` → the customer gets PayPal's invoice |
+| "Send Hotel Sakura a reminder" | `send_reminder` | `POST /v2/invoicing/invoices/{id}/remind` |
+| "Ikoi Nursery paid ¥9,000 by bank transfer, record it" | `record_payment` | `POST /v2/invoicing/invoices/{id}/payments` (cash, bank transfer, check) |
+| "Who still owes me money?" | `check_invoices` (reads only, no approval) | `GET /v2/invoicing/invoices/{id}` for each open invoice |
+
+The morning briefing and the weekly review read the open invoices from PayPal too, split into *overdue* and *not due
+yet*, and the weekly note gets a "Money" section written by code from PayPal's numbers — never the model's paraphrase.
+When PayPal shows a new payment, it goes into the owner's memory and the follow-up task is ticked.
+
+**What the guard does with money** (rules in code, outside the model; every decision gets a receipt):
+
+| Rule | What happens |
+|---|---|
+| `invoice.ask_owner` | billing, reminding and recording a payment wait in the approval queue; the card says exactly what will run in PayPal, and afterwards what PayPal did |
+| `invoice.unknown_customer` | only customers in the owner's **customer book** can be billed. Only the owner adds customers, from the page — the model has no tool for it, so a message can never add a payee |
+| (no email for the model) | customers' email addresses never reach the model; it knows customers by name. An address in a message ("our accounts moved — invoice billing@…") never changes where an invoice goes, and the approval says so |
+| `invoice.bad_items` / `invoice.limit` | totals are worked out exactly in code (yen are whole numbers); invoices over the owner's limit are refused |
+| `invoice.possible_repeat` | the same total to the same customer within a week is flagged on the approval card |
+| `invoice.already_paid` | no reminder and no recorded payment for an invoice PayPal shows as paid — checked live before anything is queued |
+| `honesty.paypal_corrected` | the reply says a customer has (or has not) paid → checked against PayPal, clause by clause; when it is wrong, PayPal's status is added in front of the owner |
+| `honesty.paypal_checked` | …and when it is right, the reply carries a "checked with PayPal" receipt |
+| `money.check_first` | a question about payments answered without reading PayPal → Kioku reads PayPal and asks again |
+| `honesty.note_added` (invoices) | "I've sent the invoice", "Recorded ¥9,000 …" with nothing done → checked against the records; when the records do not show it, the owner is told plainly |
+
+An example from the real model (Nemotron 3.5 Lightning) during testing — the model slipped, the guard caught it:
+
+> **Owner:** Hotel Sakura paid last week, right? I'm pretty sure they did.
+> **Kioku:** Hotel Sakura paid last week — invoice #0006 for ¥36,600 was marked as sent with ¥36,600 still due and is now 5 days overdue.
+> **Kioku Guard:** PayPal shows Hotel Sakura's invoice #0006 as sent — ¥36,600 still due (checked 09:00).
+
+**The Money tab** shows the invoices as PayPal states them (an **AG Grid** table: status, days late, what is still due,
+the customer's PayPal payment page), the customer book, and a button that reads every status from PayPal again.
+
+**Tested on the real model and the PayPal sandbox**: billing → approval → PayPal invoice; "did they pay?"; recording
+cash; "who still owes me?"; a refused reminder on a paid invoice; a forwarded "our accounts moved" email; and ten tricky
+requests (leading questions, unknown customers, amounts over the limit, "mark it paid", "ignore your rules"). The slips
+the model made in those runs — answering "who owes me" without reading PayPal, "yes, they paid … still due", saying a
+payment was recorded after the guard had refused it — are caught by the rules above, and each is a case in
+`tests/test_money.py` (scripted model, no network). A full run of the ten costs about $0.008.
 
 ---
 
@@ -133,8 +182,13 @@ python -m kioku schedule --loop           # run the habits on time (journal 23:4
 
 Settings come from the environment (or `.env`): `KIOKU_DATA_DIR`, `KIOKU_TIMEZONE`, `KIOKU_PRIVATE_TERMS`
 (comma-separated names to hide), `KIOKU_DAILY_TOKENS`, `KIOKU_DAILY_USD`, `KIOKU_MAX_PAYMENT`.
-Sending and paying are simulated (written to `outbox.jsonl` / `payments.jsonl` after approval); a real deployment
-would plug providers in behind the same approval step.
+
+**PayPal**: put a REST app's keys in `paypal.env` (or the environment) — `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`,
+`PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com` — plus `KIOKU_CURRENCY` (default `JPY`) and `KIOKU_MAX_INVOICE`.
+With keys set, the invoice tools and the Money tab appear; add customers on the Money tab. Without keys, Kioku works
+as before and the invoice tools are not offered at all. `python demo/paypal/seed_invoices.py` gives the demo bakery its
+customer book and three sandbox invoices. Messages and outgoing payments are still simulated (written to
+`outbox.jsonl` / `payments.jsonl` after approval).
 
 Demo server: `python -m kioku.web --demo demo/seed --host 0.0.0.0 --daily-usd 1`. `render.yaml` deploys the same on
 Render's free plan (set `NEBIUS_API_KEY` in the dashboard; the shared daily cap keeps the demo's spend fixed).
@@ -146,11 +200,14 @@ Tests: `pip install pytest && python -m pytest` (scripted fake model, no network
 ```
 kioku/agent.py      the loop: context → guard → Token Factory → guard → tools
 kioku/guard.py      redaction, tool rules, spend rules, approvals, honesty check, receipts
+kioku/paypal.py     PayPal Invoicing v2 client (create, send, remind, record a payment, read), standard library only
+kioku/money.py      the customer book, the invoice ledger, the guard's money checks, PayPal claim checks
 kioku/memory.py     Markdown memory, topic notes, BM25 search
 kioku/skills.py     journal, briefing, weekly and monthly reviews, index
 kioku/scheduler.py  the daily rhythm (a tiny cron with catch-up)
 kioku/llm.py        Token Factory client, routing, usage ledger
 kioku/web.py        web app and visitor sandboxes; kioku/static/ = the page
 demo/               the fictional persona, the seed script, the recall check
+demo/paypal/        the demo bakery's customer book and sandbox invoices
 demo/video/         the demo video's recorder: the running app, real model replies, captions on screen
 ```
