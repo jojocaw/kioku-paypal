@@ -39,7 +39,7 @@ def load_dotenv(path: Path) -> None:
     """Minimal .env reader (KEY=VALUE per line). Variables already set in the environment win."""
     if not path.is_file():
         return
-    for line in path.read_text(encoding='utf-8').splitlines():
+    for line in path.read_text(encoding='utf-8-sig').splitlines():  # -sig: files saved by Notepad start with a BOM
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
@@ -58,11 +58,18 @@ class Settings:
     private_terms: tuple[str, ...] = ()  # names etc. that must never reach a model (redacted before every call)
     max_payment: float = 200            # payments above this are refused outright (in the owner's currency)
     routes: dict = field(default_factory=lambda: dict(ROUTES))
+    # PayPal (Invoicing v2). Without keys the invoice tools are not offered at all.
+    paypal_client_id: str = field(default='', repr=False)
+    paypal_secret: str = field(default='', repr=False)
+    paypal_base_url: str = 'https://api-m.sandbox.paypal.com'
+    currency: str = 'JPY'
+    max_invoice: float = 300_000        # invoices above this are refused outright
 
     @classmethod
     def from_env(cls, root: Path | None = None, **overrides) -> 'Settings':
         root = root or Path.cwd()
         load_dotenv(root / '.env')
+        load_dotenv(root / 'paypal.env')
         env = os.environ
         values = dict(
             api_key=env.get('NEBIUS_API_KEY', ''),
@@ -73,6 +80,11 @@ class Settings:
             daily_usd_budget=float(env.get('KIOKU_DAILY_USD', cls.daily_usd_budget)),
             private_terms=tuple(t.strip() for t in env.get('KIOKU_PRIVATE_TERMS', '').split(',') if t.strip()),
             max_payment=float(env.get('KIOKU_MAX_PAYMENT', cls.max_payment)),
+            paypal_client_id=env.get('PAYPAL_CLIENT_ID', ''),
+            paypal_secret=env.get('PAYPAL_CLIENT_SECRET', ''),
+            paypal_base_url=env.get('PAYPAL_BASE_URL', cls.paypal_base_url),
+            currency=env.get('KIOKU_CURRENCY', cls.currency).upper(),
+            max_invoice=float(env.get('KIOKU_MAX_INVOICE', cls.max_invoice)),
         )
         values.update(overrides)
         return cls(**values)

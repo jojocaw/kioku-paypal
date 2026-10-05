@@ -221,7 +221,13 @@ TOOL_RULES = {
     'calculate': ('allow', 'arithmetic only, no side effects'),
     'send_message': ('ask', 'sends something outside — the owner decides'),
     'make_payment': ('ask', 'spends money — the owner decides (what, how much, to whom)'),
+    # Invoice tools: offered only with PayPal connected; Money.check decides each call (customer book, limits, status)
+    'create_invoice': ('ask', 'bills a customer through PayPal — the owner decides'),
+    'check_invoices': ('allow', 'reads invoice statuses from PayPal'),
+    'send_reminder': ('ask', 'contacts a customer through PayPal — the owner decides'),
+    'record_payment': ('ask', 'changes the books in PayPal — the owner decides'),
 }
+INVOICE_TOOLS = {'create_invoice', 'check_invoices', 'send_reminder', 'record_payment'}
 MAX_PAYMENT = 200  # default hard limit; Settings.max_payment overrides it
 # Classic payment scams: paying in gift cards, prepaid cards or crypto to someone who asked for it.
 SCAM = re.compile(r'(?i)gift\s*cards?|prepaid\s*cards?|itunes|google\s*play\s*cards?|steam\s*cards?|bitcoin|crypto|USDT|ギフトカード|プリペイド|電子マネー')
@@ -284,21 +290,41 @@ CLAIMS = [
                          r"|\b(?:is|it's|are|now) (?:waiting|pending) (?:for )?your approval\b|\bawaiting your approval\b")),
     ('complete_task', re.compile(r"(?i)\bi(?:'ve| have|'ll| will) (?:also |now |just |go ahead and )?mark(?:ed)?\b[^.!?\n]{0,40}?\b(?:done|complete(?:d)?|finished)\b"
                                  r"|\b(?:is|has been) (?:now )?marked (?:as )?(?:done|complete(?:d)?|finished)\b")),
+    # Invoices go out only after the owner approves, so "I've sent the invoice" inside a turn is never true. Only the
+    # first person is a claim: "invoice #0007 was sent on Monday" is a status the reply may report (checked with PayPal).
+    ('create_invoice', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:sent|issued|created|emailed) (?:the |an |a |your |their )?"
+                                  r"(?:\w+ )?invoice\b|\bi(?:'ve| have) (?:just |now |already )?billed\b")),
+    ('send_reminder', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?sent (?:a |the |them a |her a |him a )?(?:friendly |payment )?reminder\b")),
+    ('record_payment', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:recorded|logged|entered|marked) (?:the |their |his |her |that |this )?"
+                                  r"(?:payment|cash|transfer|invoice (?:#?\w+ )?as paid)\b")),
 ]
+ALWAYS_UNBACKED = {'send_message', 'make_payment', 'create_invoice', 'send_reminder', 'record_payment'}  # never done inside a turn
 
 
 NOT_DONE = {'save_memory': 'nothing was saved — passwords and card numbers are never kept in your notes',
             'add_task': 'no task was added', 'send_message': 'nothing was sent — messages go out only after you approve them',
             'make_payment': 'nothing was paid — payments happen only after you approve them',
             'complete_task': 'no task was marked done',
-            'queue': 'nothing was queued for your approval — ask again and it will wait in the approvals panel'}
+            'queue': 'nothing was queued for your approval — ask again and it will wait in the approvals panel',
+            'create_invoice': 'no invoice was sent — invoices go out through PayPal only after you approve them',
+            'send_reminder': 'no reminder was sent — reminders go out only after you approve them',
+            'record_payment': 'nothing was recorded in PayPal — that waits for your approval too'}
+SENTENCE = re.compile(r'[^.!?\n]+[.!?]?')
 
 
-def unbacked_claims(text: str, done: set[str]) -> list[str]:
+def unbacked_claims(text: str, done: set[str], money_words: re.Pattern | None = None) -> list[str]:
     """Tools the reply claims were used that did not run (done = tools allowed and run in this turn, plus 'queue' when
-    something was queued for the owner)."""
-    return [tool for tool, rx in CLAIMS
-            if rx.search(text or '') and (tool in ('send_message', 'make_payment') or tool not in done)]
+    something was queued for the owner). money_words: sentences about invoices or customers are checked against PayPal
+    instead (money.verify), so "invoice #0007 has been paid" there is not read as the owner paying someone."""
+    found = []
+    for tool, rx in CLAIMS:
+        if tool in done and tool not in ALWAYS_UNBACKED:
+            continue
+        for sentence in (m.strip() for m in SENTENCE.findall(text or '')):
+            if rx.search(sentence) and not (money_words and tool in ('send_message', 'make_payment') and money_words.search(sentence)):
+                found.append(tool)
+                break
+    return found
 
 
 class Approvals:
@@ -327,6 +353,16 @@ class Approvals:
 
     def list(self, status: str | None = 'pending') -> list[dict]:
         return [a for a in self._load() if status is None or a['status'] == status]
+
+    def finish(self, aid: str, outcome: str, result: str) -> None:
+        """What happened after an approval: outcome 'done' or 'failed', and the words the owner sees."""
+        items = self._load()
+        for a in items:
+            if a['id'] == aid:
+                a['outcome'], a['result'] = outcome, result[:500]
+                self._save(items)
+                return
+        raise KeyError(aid)
 
     def decide(self, aid: str, approve: bool) -> dict:
         items = self._load()
@@ -398,8 +434,20 @@ class Guard:
         calls = [ToolCall(c.id, c.name, self.redactor.restore_obj(c.arguments, vault, withhold)) for c in result.tool_calls]
         return self.redactor.restore(result.content, vault, withhold), calls
 
+    money = None  # kioku.money.Money when PayPal is connected (set by Kioku)
+
     def check_tool(self, call: ToolCall, redacted_args: dict, context: str = '') -> Decision:
-        action, rule, reason = check_tool_rules(ToolCall(call.id, call.name, redacted_args), self.settings.max_payment,
-                                                context)
+        if call.name in INVOICE_TOOLS and '_unparsed' not in call.arguments:
+            # decided on the owner's side with the real names: the customer book, the limits, PayPal's own status
+            if self.money is None:
+                action, rule, reason = 'block', 'paypal.off', 'PayPal is not connected'
+            else:
+                try:
+                    action, rule, reason = self.money.check(call.name, call.arguments)
+                except Exception as e:  # PayPal unreachable or refusing: nothing is queued on a guess
+                    action, rule, reason = 'block', 'paypal.unreachable', f'could not check with PayPal ({str(e)[:160]})'
+        else:
+            action, rule, reason = check_tool_rules(ToolCall(call.id, call.name, redacted_args), self.settings.max_payment,
+                                                    context)
         receipt = self.audit.log('tool_call', action, rule, reason, tool=call.name)
         return Decision(action, rule, reason, receipt)

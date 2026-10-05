@@ -3,6 +3,9 @@
 Tools with an outside effect (send_message, make_payment) are never run directly: the guard turns them into
 an approval request. In this repository they run against a local outbox / payments file (simulated); a real
 deployment would plug in mail or payment providers behind the same approval step.
+
+The invoice tools (INVOICE_TOOLS) are offered only when PayPal is connected. Billing, reminding and recording a
+payment wait for the owner like sending and paying; after the owner approves they run against PayPal (money.py).
 """
 from __future__ import annotations
 
@@ -40,6 +43,23 @@ TOOLS = [
     _fn('make_payment', "Pay for something for the owner. It always waits for the owner's approval.",
         {'what': S, 'amount': {'type': 'number'}, 'currency': S, 'payee': S}, ['what', 'amount', 'payee']),
 ]
+
+N = {'type': 'number'}
+INVOICE_TOOLS = [
+    _fn('create_invoice', "Bill one of the owner's customers through PayPal. customer: the name from the customer book. "
+        'items: what was sold, each with name, quantity and unit_price. It always waits for the owner\'s approval.',
+        {'customer': S, 'items': {'type': 'array', 'items': {'type': 'object', 'properties': {'name': S, 'quantity': N, 'unit_price': N},
+                                                              'required': ['name', 'quantity', 'unit_price']}},
+         'due_days': {'type': 'integer'}, 'note': S}, ['customer', 'items']),
+    _fn('check_invoices', "Read the owner's invoices from PayPal: who has paid and what is still due. Call it before answering "
+        "anything about payments. customer: optional name; which: 'open' (default), 'paid' or 'all'.", {'customer': S, 'which': S}, []),
+    _fn('send_reminder', 'Send a payment reminder through PayPal for an unpaid invoice. invoice: its number (e.g. #0007) or the '
+        "customer's name. It always waits for the owner's approval.", {'invoice': S, 'note': S}, ['invoice']),
+    _fn('record_payment', 'Record money the owner received outside PayPal (cash or bank transfer) against an invoice. invoice: its '
+        "number or the customer's name; amount: leave out for the full amount due. It always waits for the owner's approval.",
+        {'invoice': S, 'amount': N, 'method': S}, ['invoice']),
+]
+INVOICE_TOOL_NAMES = {t['function']['name'] for t in INVOICE_TOOLS}
 
 
 OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
