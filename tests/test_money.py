@@ -17,6 +17,8 @@ BREAD = [{'name': 'Baguette', 'quantity': 40, 'unit_price': 320}, {'name': 'Croi
 class FakePayPal:
     """Stands in for kioku.paypal.PayPal: keeps invoices the way PayPal reports them."""
 
+    sandbox = True
+
     def __init__(self, fail: str = ''):
         self.invoices, self.calls, self.fail, self.n = {}, [], fail, 0
 
@@ -25,7 +27,7 @@ class FakePayPal:
         if self.fail == name:
             raise PayPalError(422, 'UNPROCESSABLE_ENTITY', 'test refusal')
 
-    def create_invoice(self, *, business_name, email, items, currency, due=None, note='', reference=''):
+    def create_invoice(self, *, business_name, email, items, currency, due=None, note='', reference='', invoice_date=None):
         self._call('create_invoice')
         self.n += 1
         iid = f'INV2-TEST-{self.n:04d}'

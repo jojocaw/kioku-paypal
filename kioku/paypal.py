@@ -95,9 +95,12 @@ class PayPal:
 
     # ------------------------------------------------------------ invoices
     def create_invoice(self, *, business_name: str, email: str, items: list[dict], currency: str, due: date | None = None,
-                       note: str = '', reference: str = '') -> str:
-        """items: [{'name', 'quantity', 'unit_price'}]. Returns the invoice id (INV2-…), still a draft."""
+                       note: str = '', reference: str = '', invoice_date: date | None = None) -> str:
+        """items: [{'name', 'quantity', 'unit_price'}]. Returns the invoice id (INV2-…), still a draft.
+        invoice_date: the owner's today (PayPal accepts past dates; the demo's clock runs behind the real one)."""
         detail = {'currency_code': currency}
+        if invoice_date:
+            detail['invoice_date'] = invoice_date.isoformat()
         if note:
             detail['note'] = note[:4000]
         if reference:

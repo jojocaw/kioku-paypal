@@ -7,6 +7,8 @@
 <meta name="description" content="A private AI secretary whose memory grows, with rules enforced outside the model.">
 <link rel="stylesheet" href="/static/app.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f6f5c'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif'%3E記%3C/text%3E%3C/svg%3E">
+<!-- AG Grid Community (MIT) for the invoice table; the page falls back to a plain table if it cannot load -->
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.2.0/dist/ag-grid-community.min.js" integrity="sha384-icvtRKM0YJJgeDhXnWY8UlF1PVBFd4K8Pj61la+vG+EU+awBeoP0xGPZhCD2SQOV" crossorigin="anonymous" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -28,6 +30,7 @@
   <button role="tab" data-tab="memory">Memory</button>
   <button role="tab" data-tab="guard">Guard</button>
   <button role="tab" data-tab="approvals">Approvals <span class="count" id="pending-count"></span></button>
+  <button role="tab" data-tab="money" id="tab-money" hidden>Money · PayPal <span class="count late" id="late-count"></span></button>
   <button role="tab" data-tab="usage">Models &amp; cost</button>
   <button role="tab" data-tab="rhythm">Daily rhythm</button>
 </nav>
@@ -69,6 +72,22 @@
       <div id="approvals"></div>
     </div>
 
+    <div class="view" id="panel-money" hidden>
+      <p class="lead">Invoices, reminders and payments received go through <strong>PayPal</strong> — only after you approve them. Kioku keeps a copy, but <strong>PayPal is the record</strong>: whenever a status matters Kioku reads it from PayPal, and the guard checks anything the model says about who has paid.</p>
+      <div class="money-sum" id="money-sum"></div>
+      <div class="money-bar"><button type="button" id="money-refresh">Read PayPal again</button><span class="fine" id="money-note"></span></div>
+      <div id="invoice-grid" class="invoice-grid"></div>
+      <h3 class="sub">Customer book</h3>
+      <p class="fine">Only you can add customers — the model has no tool for it, so a message can never add a new payee. Email addresses stay on your side; the model knows customers by name.</p>
+      <ul class="customers" id="customers"></ul>
+      <form class="add-customer" id="add-customer" autocomplete="off">
+        <input name="name" placeholder="Name, e.g. Bistro Kaze" maxlength="80" required aria-label="Customer name">
+        <input name="email" type="email" placeholder="orders@bistro-kaze.example.com" maxlength="120" required aria-label="Customer email">
+        <input name="note" placeholder="Note (optional)" maxlength="160" aria-label="Note">
+        <button type="submit">Add customer</button>
+      </form>
+    </div>
+
     <div class="view" id="panel-usage" hidden>
       <p class="lead">Each job goes to the NVIDIA Nemotron model that fits it, on Nebius Token Factory. Everyday turns and tool calls use <strong>Nemotron 3.5 Lightning</strong> with thinking off; weekly and monthly reviews use <strong>Nemotron 3 Super</strong>. Real numbers from this memory's life:</p>
       <div id="usage"></div>
@@ -94,7 +113,7 @@
 </main>
 
 <footer class="foot">
-  <p>Kioku runs on NVIDIA Nemotron models through Nebius Token Factory. The bakery and everyone in it are fictional; each visitor gets a private copy that resets. <a href="#" id="reset">Start over</a></p>
+  <p>Kioku runs on NVIDIA Nemotron models through Nebius Token Factory; invoices go through the PayPal sandbox (no real money). The bakery, its customers and everyone in it are fictional; each visitor gets a private copy that resets. <a href="#" id="reset">Start over</a></p>
 </footer>
 </body>
 </html>

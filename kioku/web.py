@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import shutil
 import sys
@@ -32,6 +33,9 @@ from .agent import Kioku
 from .config import Settings
 from .llm import CreditsExhausted, LLMError
 from .memory import week_id
+from .money import fmt
+from .paypal import CLOSED, PAID, PayPal, PayPalError
+from .tools import INVOICE_TOOL_NAMES
 
 STATIC = Path(__file__).parent / 'static'
 MAX_TEXT = 1000            # characters per chat message
@@ -40,6 +44,11 @@ JOBS_PER_HOUR = 6          # journal / briefing / review runs per visitor
 SANDBOX_IDLE_S = 2 * 3600  # a sandbox nobody touched for this long is deleted
 MAX_SANDBOXES = 300
 NEW_PER_IP_HOUR = 12       # new sandboxes per network per hour (a reload keeps its sandbox through the cookie)
+PAYPAL_PER_HOUR = 8        # approved invoices, reminders and recorded payments per visitor per hour (PayPal sandbox)
+PAYPAL_PER_DAY = 300       # the same for all visitors together
+REFRESH_PER_HOUR = 30      # "read PayPal again" per visitor per hour
+# In the public demo, customers can only be added with reserved addresses (RFC 2606/6761): nobody real gets an invoice.
+DEMO_EMAIL = re.compile(r'(?i)@(?:[\w-]+\.)*(?:example\.(?:com|net|org)|[\w-]+\.(?:example|test|invalid))$')
 
 
 class TooMany(Exception):
@@ -77,9 +86,10 @@ class Space:
         self.touched = time.time()
         self.chats: deque = deque()
         self.jobs: deque = deque()
+        self.queues = {'chat': self.chats, 'job': self.jobs}
 
     def allow(self, kind: str, per_hour: int) -> bool:
-        q = self.chats if kind == 'chat' else self.jobs
+        q = self.queues.setdefault(kind, deque())
         now = time.time()
         while q and now - q[0] > 3600:
             q.popleft()
@@ -89,14 +99,19 @@ class Space:
         return True
 
     def left(self, kind: str, per_hour: int) -> int:
-        q = self.chats if kind == 'chat' else self.jobs
+        q = self.queues.get(kind, deque())
         return max(0, per_hour - sum(1 for t in q if time.time() - t <= 3600))
 
 
 class App:
-    def __init__(self, settings: Settings, seed: Path | None, daily_usd: float, sandbox_root: Path | None = None):
+    def __init__(self, settings: Settings, seed: Path | None, daily_usd: float, sandbox_root: Path | None = None,
+                 paypal=None):
         self.settings, self.seed = settings, seed
         self.meter = Meter(daily_usd)
+        # one PayPal client for every sandbox (one token); none without keys, and then the invoice tools are not offered
+        self.paypal = paypal or (PayPal(settings.paypal_client_id, settings.paypal_secret, settings.paypal_base_url)
+                                 if settings.paypal_client_id and settings.paypal_secret else None)
+        self.paypal_day, self.paypal_writes = '', 0
         self.spaces: dict[str, Space] = {}
         self.lock = threading.Lock()
         self.persona = json.loads((seed / 'persona.json').read_text(encoding='utf-8')) if seed else {}
@@ -110,7 +125,7 @@ class App:
             self.viewer = self._space_over(seed, writable=False)
             threading.Thread(target=self._sweeper, daemon=True).start()
         else:
-            self.owner = Space(Kioku(settings))
+            self.owner = Space(Kioku(settings, paypal=self.paypal))
             threading.Thread(target=self._rhythm, daemon=True).start()
 
     def _rhythm(self) -> None:
@@ -162,7 +177,7 @@ class App:
             clock = lambda: start + timedelta(seconds=time.time() - born)  # noqa: E731  the persona's day moves with real time
         else:
             clock = lambda: start  # noqa: E731
-        return Space(Kioku(settings, clock=clock), folder if writable else None)
+        return Space(Kioku(settings, clock=clock, paypal=self.paypal), folder if writable else None)
 
     def _drop(self, sid: str) -> None:
         s = self.spaces.pop(sid, None)
@@ -196,7 +211,50 @@ class App:
                         asked=sum(r['decision'] == 'ask' for r in rows),
                         pending=len(k.approvals.list())),
             limits=dict(chats_left=s.left('chat', CHATS_PER_HOUR), jobs_left=s.left('job', JOBS_PER_HOUR)),
+            money=self.money_summary(s),
         )
+
+    # ---------------------------------------------------------------- money (PayPal)
+    def money_summary(self, s: Space) -> dict:
+        money = s.k.money
+        if not money.on:
+            return dict(on=False)
+        rows, today = money.ledger.all(), s.k.clock().date()
+        open_ = [r for r in rows if r.get('status') not in CLOSED]
+        late = [r for r in open_ if r.get('due_date') and date.fromisoformat(r['due_date']) < today]
+        due = sum(float(r.get('due_amount') or r['total']) for r in open_)
+        return dict(on=True, sandbox=getattr(self.paypal, 'sandbox', True), open=len(open_), overdue=len(late),
+                    due=fmt(due, money.currency), customers=len(money.customers.all()))
+
+    def invoices(self, s: Space) -> dict:
+        money, today = s.k.money, s.k.clock().date()
+        out = []
+        for r in money.ledger.all()[::-1]:
+            late = 0
+            if r.get('status') not in CLOSED and r.get('due_date'):
+                late = max(0, (today - date.fromisoformat(r['due_date'])).days)
+            out.append(dict(number=r.get('number', ''), customer=r['customer'], total=float(r['total']),
+                            due=float(r.get('due_amount') or 0), status=r.get('status', ''), due_date=r.get('due_date', ''),
+                            late=late, created=r.get('created', '')[:10], checked=r.get('checked', '')[:16].replace('T', ' '),
+                            paid=r.get('status') in PAID, url=r.get('payer_url', ''), shared=bool(r.get('shared')),
+                            approval=r.get('approval', ''),
+                            items=', '.join(f'{i["name"]} {i["quantity"]} × {fmt(i["unit_price"], r["currency"])}' for i in r.get('items', []))))
+        return dict(on=money.on, currency=money.currency, rows=out, summary=self.money_summary(s))
+
+    def paypal_write_ok(self, s: Space) -> str:
+        """'' when this visitor may carry out one more PayPal action now, else why not."""
+        if not self.seed:
+            return ''
+        today = datetime.now(timezone.utc).date().isoformat()
+        with self.lock:
+            if today != self.paypal_day:
+                self.paypal_day, self.paypal_writes = today, 0
+            if self.paypal_writes >= PAYPAL_PER_DAY:
+                return "The demo's PayPal actions for today are used up. They reset at 00:00 UTC."
+            if not s.allow('paypal', PAYPAL_PER_HOUR):
+                return f'Demo limit: {PAYPAL_PER_HOUR} PayPal actions an hour per visitor.'
+            self.paypal_writes += 1
+        return ''
 
     def chat(self, s: Space, text: str) -> tuple[int, dict]:
         text = (text or '').strip()
@@ -292,8 +350,9 @@ def make_handler(app: App):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('Content-Security-Policy',
-                             "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-                             "font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'")
+                             "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
+                             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                             "font-src https://fonts.gstatic.com data:; img-src 'self' data:; frame-ancestors 'none'")
             if sid:
                 secure = '; Secure' if self.headers.get('X-Forwarded-Proto') == 'https' else ''
                 self.send_header('Set-Cookie', f'kioku_sid={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400{secure}')
@@ -353,6 +412,10 @@ def make_handler(app: App):
                 return self._json(200, dict(items=k.approvals.list(None)[::-1]), new_sid)
             if url.path == '/api/usage':
                 return self._json(200, app.usage(s), new_sid)
+            if url.path == '/api/invoices':
+                return self._json(200, app.invoices(s), new_sid)
+            if url.path == '/api/customers':
+                return self._json(200, dict(rows=[c.__dict__ for c in k.money.customers.all()], on=k.money.on), new_sid)
             if url.path == '/api/history':  # today's conversation, so a reload does not look like a reset
                 turns = [t for t in k.memory.log_for(k.clock().date()) if t.get('role') in ('owner', 'kioku')]
                 return self._json(200, dict(turns=turns[-40:]), new_sid)
@@ -383,12 +446,41 @@ def make_handler(app: App):
                 code, data = app.run(s, str(body.get('job', '')))
                 return self._json(code, data, new_sid)
             if url.path == '/api/approvals/decide':  # the owner's control — a button on the page, not a tool
+                aid, approve = str(body.get('id', '')), bool(body.get('approve'))
+                item = next((i for i in s.k.approvals.list() if i['id'] == aid), None)
+                if approve and item and item['tool'] in INVOICE_TOOL_NAMES:
+                    why = app.paypal_write_ok(s)
+                    if why:
+                        return self._json(429, dict(error=why), new_sid)
                 try:
                     with s.lock:
-                        result = s.k.decide(str(body.get('id', '')), bool(body.get('approve')))
+                        result = s.k.decide(aid, approve)
                     return self._json(200, dict(result=result), new_sid)
                 except (KeyError, ValueError) as e:
                     return self._json(400, dict(error=str(e)), new_sid)
+            if url.path == '/api/invoices/refresh':  # the owner's control: read every invoice's status from PayPal now
+                if not s.k.money.on:
+                    return self._json(400, dict(error='PayPal is not connected.'), new_sid)
+                if app.seed and not s.allow('refresh', REFRESH_PER_HOUR):
+                    return self._json(429, dict(error=f'Demo limit: {REFRESH_PER_HOUR} PayPal checks an hour per visitor.'), new_sid)
+                try:
+                    with s.lock:
+                        s.k.check_invoices({'which': 'all'}, s.k.clock())
+                except PayPalError as e:
+                    return self._json(502, dict(error=str(e)), new_sid)
+                return self._json(200, app.invoices(s), new_sid)
+            if url.path == '/api/customers':  # the owner's control: the model has no tool that adds customers
+                name, email = str(body.get('name', '')).strip()[:80], str(body.get('email', '')).strip()[:120]
+                if app.seed and not DEMO_EMAIL.search(email):
+                    return self._json(400, dict(error='In the demo, use a reserved address such as name@shop.example.com '
+                                                      '(nobody real can receive a demo invoice).'), new_sid)
+                try:
+                    with s.lock:
+                        c = s.k.money.customers.add(name, email, str(body.get('note', ''))[:160])
+                        s.k.audit.log('customer', 'allow', 'owner.customer_added', f'{c.name} added to the customer book by the owner')
+                except ValueError as e:
+                    return self._json(400, dict(error=str(e)), new_sid)
+                return self._json(200, dict(rows=[c.__dict__ for c in s.k.money.customers.all()], on=s.k.money.on), new_sid)
             return self._json(404, dict(error='Not found.'), new_sid)
 
     return Handler

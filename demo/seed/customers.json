@@ -1,0 +1,17 @@
+[
+ {
+  "name": "Café Hana",
+  "email": "orders@cafe-hana.example.com",
+  "note": "wholesale baguettes and country loaves, Fridays"
+ },
+ {
+  "name": "Hotel Sakura",
+  "email": "kitchen@hotel-sakura.example.com",
+  "note": "breakfast croissants and rolls, billed monthly"
+ },
+ {
+  "name": "Ikoi Nursery",
+  "email": "office@ikoi-nursery.example.com",
+  "note": "afternoon snack bread, billed monthly"
+ }
+]

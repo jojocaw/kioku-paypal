@@ -206,6 +206,9 @@ class Money:
             row = self.refresh_one(row)
             if row['status'] in PAID:
                 return 'block', 'invoice.already_paid', f'PayPal shows #{row["number"]} ({row["customer"]}) as paid'
+            if row.get('shared'):  # the public demo's starting invoices are the same PayPal invoices for every visitor
+                return ('block', 'demo.shared_invoice', f'#{row["number"]} is shared by everyone trying the demo — bill a customer '
+                        'yourself to try reminders and payments')
             if row['status'] in CLOSED:
                 return 'block', 'invoice.closed', f'PayPal shows #{row["number"]} as {row["status"].lower()}'
             due = Decimal(row['due_amount'])
@@ -232,7 +235,8 @@ class Money:
                 raise ValueError(problem or 'the customer is no longer in the customer book')
             due = (now + timedelta(days=int(args.get('due_days') or 14))).date()
             iid = self.paypal.create_invoice(business_name=cust.name, email=cust.email, items=items, currency=self.currency,
-                                             due=due, note=str(args.get('note') or '')[:500], reference=f'Kioku {approval_id}')
+                                             due=due, note=str(args.get('note') or '')[:500], reference=f'Kioku {approval_id}',
+                                             invoice_date=now.date())
             payer = self.paypal.send_invoice(iid, notify=self.notify)
             s = summary(self.paypal.get_invoice(iid))
             row = {**s, 'customer': cust.name, 'items': [{'name': i['name'], 'quantity': plain(i['quantity']),

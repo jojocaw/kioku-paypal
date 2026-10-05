@@ -176,3 +176,41 @@ tr.flash td { background: var(--ask-bg); }
   .chat, .side { max-height: none; height: 100%; min-height: 0; }
   .tree { max-height: calc(100vh - 250px); }
 }
+
+/* money (PayPal) */
+:root { --pp: #0070e0; --pp-bg: #e8f1fc; }
+@media (prefers-color-scheme: dark) { :root { --pp: #6fb1ff; --pp-bg: #14243a; } }
+.money-sum { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; }
+.money-sum .stat.late b, .stat.late b { color: var(--block); }
+.money-sum .stat.paid b { color: var(--allow); }
+.stat.pp b { color: var(--pp); }
+.money-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.money-bar button, .add-customer button { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 8px; padding: 6px 12px; font-size: 13px; }
+.money-bar button:hover, .add-customer button:hover { border-color: var(--accent); }
+.money-bar .fine { margin: 0; }
+.invoice-grid { width: 100%; margin-bottom: 6px; }
+.invoice-grid a { color: var(--pp); text-decoration: none; }
+.pill-st { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; line-height: 1.6; }
+.pill-st.open { background: var(--pp-bg); color: var(--pp); }
+.pill-st.late { background: var(--block-bg); color: var(--block); }
+.pill-st.paid { background: var(--allow-bg); color: var(--allow); }
+.pill-st.cancelled { background: var(--soft); color: var(--muted); }
+.shared { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 4px; padding: 0 4px; margin-left: 4px; vertical-align: 1px; }
+.sub { margin: 18px 0 4px; font-size: 14px; }
+.customers { list-style: none; padding: 0; margin: 8px 0; font-size: 13px; }
+.customers li { padding: 5px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.customers .mono { color: var(--muted); font-size: 12px; }
+.customers .fine { display: inline; margin: 0; }
+.add-customer { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.add-customer input { flex: 1 1 160px; min-width: 0; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px; }
+.card.pp { border-left: 3px solid var(--pp); }
+.card.pp.pending { border-color: var(--ask); border-left-color: var(--pp); }
+.outcome { margin: 6px 0 0; font-size: 13px; padding: 6px 8px; border-radius: 8px; background: var(--allow-bg); color: var(--allow); }
+.outcome.failed { background: var(--block-bg); color: var(--block); }
+.ev.pp { border-color: var(--pp); }
+.count.late:not(:empty) { background: var(--block); }
+.badge.failed { background: var(--block-bg); color: var(--block); }
+.invoice-grid .ag-center-cols-viewport { min-height: 0 !important; }  /* autoHeight keeps room for an overlay otherwise */

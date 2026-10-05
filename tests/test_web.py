@@ -152,3 +152,102 @@ def test_approvals_are_decided_by_the_page_not_the_model(demo):
     code, d, _ = call(base, '/api/approvals/decide', {'id': a['items'][0]['id'], 'approve': True}, cookie)
     assert code == 200 and 'carried out' in d['result']
     assert (space.folder / 'payments.jsonl').exists()
+
+
+# ---------------------------------------------------------------- money (PayPal)
+@pytest.fixture
+def shop(tmp_path):
+    """A demo server whose seed has a customer book and one shared invoice, with a stand-in for PayPal."""
+    from test_money import FakePayPal
+    seed = tmp_path / 'seed'
+    (seed / 'memory').mkdir(parents=True)
+    (seed / 'memory' / 'index.md').write_text('# Index\n')
+    (seed / 'persona.json').write_text(json.dumps(dict(
+        name='Rin', business='Komorebi Bakery', started='2026-07-06', now='2026-10-05T09:00', timezone='Asia/Tokyo',
+        private_terms=[], max_payment=100000, suggestions=[])))
+    pp = FakePayPal()
+    from datetime import date
+    iid = pp.create_invoice(business_name='Hotel Sakura', email='kitchen@hotel-sakura.example.com', currency='JPY', due=date(2026, 9, 30),
+                            items=[{'name': 'Croissant', 'quantity': 120, 'unit_price': 260}])
+    pp.send_invoice(iid)
+    from kioku.paypal import summary
+    (seed / 'invoices.json').write_text(json.dumps([{**summary(pp.get_invoice(iid)), 'customer': 'Hotel Sakura', 'items': [],
+                                                     'created': '2026-09-16T17:00:00+09:00', 'shared': True, 'checked': ''}]))
+    (seed / 'customers.json').write_text(json.dumps([{'name': 'Hotel Sakura', 'email': 'kitchen@hotel-sakura.example.com', 'note': ''},
+                                                     {'name': 'Café Hana', 'email': 'orders@cafe-hana.example.com', 'note': ''}]))
+    app = web.App(Settings(api_key='test-key', data_dir=tmp_path / 'unused'), seed, daily_usd=1.0,
+                  sandbox_root=tmp_path / 'sandboxes', paypal=pp)
+    scripted = []
+    original = app._new_sandbox
+
+    def sandbox_with_fake_model(sid):
+        space = original(sid)
+        space.k.llm = FakeLLM(*scripted)
+        return space
+
+    app._new_sandbox = sandbox_with_fake_model
+    server = ThreadingHTTPServer(('127.0.0.1', 0), web.make_handler(app))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield app, f'http://127.0.0.1:{server.server_address[1]}', scripted, pp
+    server.shutdown()
+
+
+def test_the_money_tab_reads_the_shared_invoices_without_a_sandbox(shop):
+    app, base, scripted, pp = shop
+    code, d, _ = call(base, '/api/invoices')
+    assert code == 200 and d['on'] and d['summary']['overdue'] == 1 and d['summary']['open'] == 1
+    [row] = d['rows']
+    assert row['customer'] == 'Hotel Sakura' and row['late'] == 5 and row['shared'] and row['total'] == 31200
+    code, st, _ = call(base, '/api/state')
+    assert st['money']['on'] and st['money']['due'] == '¥31,200'
+
+
+def test_only_reserved_addresses_can_be_added_to_the_demo_customer_book(shop):
+    app, base, scripted, pp = shop
+    code, r, set_cookie = call(base, '/api/customers', {'name': 'Bistro Kaze', 'email': 'orders@bistro-kaze.example.com', 'note': 'new'})
+    assert code == 200 and 'Bistro Kaze' in [c['name'] for c in r['rows']]
+    code, r, _ = call(base, '/api/customers', {'name': 'Real Person', 'email': 'someone@gmail.com'}, set_cookie.split(';')[0])
+    assert code == 400 and 'reserved address' in r['error'] and len(app.spaces) == 1
+    space = next(iter(app.spaces.values()))
+    assert any(row['rule'] == 'owner.customer_added' for row in space.k.audit.rows())
+
+
+def test_a_visitor_cannot_remind_on_a_shared_demo_invoice(shop):
+    app, base, scripted, pp = shop
+    scripted += [('', [('send_reminder', {'invoice': 'Hotel Sakura'})]), 'That invoice is shared in the demo.']
+    code, r, _ = call(base, '/api/chat', {'text': 'Send Hotel Sakura a reminder.'})
+    assert code == 200 and any(e['rule'] == 'demo.shared_invoice' for e in r['events'])
+    assert 'remind' not in pp.calls
+
+
+def test_approving_an_invoice_runs_it_in_paypal_and_the_demo_caps_paypal_actions(shop, monkeypatch):
+    app, base, scripted, pp = shop
+    monkeypatch.setattr(web, 'PAYPAL_PER_HOUR', 1)
+    bread = [{'name': 'Baguette', 'quantity': 40, 'unit_price': 320}]
+    scripted += [('', [('create_invoice', {'customer': 'Café Hana', 'items': bread})]), 'Waiting for your approval.',
+                 ('', [('create_invoice', {'customer': 'Café Hana', 'items': bread * 1 + [{'name': 'Loaf', 'quantity': 1, 'unit_price': 680}]})]),
+                 'Waiting for your approval.']
+    code, r, set_cookie = call(base, '/api/chat', {'text': 'Bill Café Hana for 40 baguettes at 320.'})
+    cookie = set_cookie.split(';')[0]
+    code, r, _ = call(base, '/api/approvals/decide', {'id': 'A-001', 'approve': True}, cookie)
+    assert code == 200 and 'Invoice #0002 sent to Café Hana' in r['result']
+    code, d, _ = call(base, '/api/invoices', cookie=cookie)
+    assert [x['number'] for x in d['rows']][:1] == ['0002']
+    call(base, '/api/chat', {'text': 'And bill Café Hana for 40 baguettes and a loaf.'}, cookie)
+    code, r, _ = call(base, '/api/approvals/decide', {'id': 'A-002', 'approve': True}, cookie)
+    assert code == 429 and 'PayPal actions an hour' in r['error']
+    code, a, _ = call(base, '/api/approvals', cookie=cookie)
+    assert [i['status'] for i in a['items'] if i['id'] == 'A-002'] == ['pending']  # still waiting, nothing ran
+
+
+def test_read_paypal_again_needs_paypal(demo):
+    app, base, scripted = demo
+    code, r, _ = call(base, '/api/invoices/refresh', {})
+    assert code == 400 and 'not connected' in r['error']
+
+
+def test_the_page_may_load_the_invoice_grid_from_the_cdn_only(demo):
+    app, base, scripted = demo
+    with urllib.request.urlopen(base + '/') as r:
+        csp = r.headers['Content-Security-Policy']
+    assert "script-src 'self' https://cdn.jsdelivr.net" in csp and "default-src 'self'" in csp
