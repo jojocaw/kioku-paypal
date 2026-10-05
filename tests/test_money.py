@@ -335,3 +335,31 @@ def test_the_weekly_review_keeps_paypals_numbers_word_for_word(shop):
     body = k.memory.read(rel)
     assert '## Money (as PayPal stated it at the review)\nNot due yet:\n- #0001 · Café Hana · ¥19,040 still due · due 2026-10-19' in body
     assert 'Invoices still open (read from PayPal now' in fake.sent[-1]['messages'][-1]['content']
+
+
+def test_saying_a_payment_was_recorded_when_the_guard_refused_it_is_corrected(shop):
+    k, fake, pp = billed(shop)
+    k.money.ledger.update('INV2-TEST-0001', shared=True)  # a shared demo invoice: recording is refused
+    fake.responses += [('', [('record_payment', {'invoice': 'Café Hana', 'method': 'bank transfer'})]),
+                       'The payment of ¥19,040 from Café Hana by bank transfer has been recorded.']
+    reply = k.chat("Café Hana's office called: they paid by bank transfer this morning. Record it.")
+    assert any(e.rule == 'demo.shared_invoice' for e in reply.events)
+    assert 'nothing was recorded in PayPal' in reply.text
+
+
+def test_recorded_at_the_start_of_a_sentence_is_a_claim_too(shop):
+    k, fake, pp = billed(shop)
+    k.money.ledger.update('INV2-TEST-0001', shared=True)
+    fake.responses += [('', [('record_payment', {'invoice': 'Café Hana'})]), 'Recorded ¥19,040 from Café Hana by bank transfer (invoice #0001).']
+    reply = k.chat('Café Hana paid by bank transfer. Record it.')
+    assert 'nothing was recorded in PayPal' in reply.text
+
+
+def test_a_true_record_claim_about_an_earlier_approval_is_left_alone(shop):
+    k, fake, pp = billed(shop)
+    fake.responses += [('', [('record_payment', {'invoice': '#0001', 'method': 'cash'})]), 'Waiting for your approval.']
+    k.chat('Café Hana paid in cash, record it.')
+    k.decide('A-002', True)
+    fake.responses += ['Yes — the cash payment has been recorded and PayPal shows invoice #0001 for Café Hana as paid.'] * 2
+    reply = k.chat('Did you record the Café Hana payment?')
+    assert 'nothing was recorded' not in reply.text and 'Kioku Guard' not in reply.text

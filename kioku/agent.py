@@ -15,7 +15,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .guard import CLAIMS, NOT_DONE, Approvals, Audit, Blocked, Guard, Vault, mask_secrets, unbacked_claims, withhold_known
+from .guard import (CLAIMS, INVOICE_CLAIMS, NOT_DONE, Approvals, Audit, Blocked, Guard, Vault, mask_secrets, unbacked_claims,
+                    withhold_known)
 from .llm import LLMResult, TokenFactory, ToolCall, UsageLedger
 from .memory import Memory
 from .money import Money, fmt
@@ -68,8 +69,9 @@ ACT_NOW_MONEY = ('[Kioku] The owner asked you to send, pay or bill. Call the too
 MONEY_RULES = ("\n- Money: the owner's customers are {names}. Bill a customer with create_invoice (by name, with each item's quantity "
                'and unit price). Before saying who has paid or what is still due, call check_invoices — PayPal is the record, not '
                'your memory. Use send_reminder for an unpaid invoice and record_payment for money received in cash or by transfer. '
-               "Billing, reminding and recording wait for the owner's approval; never say an invoice or reminder was sent, or that "
-               'someone paid, unless a tool result in this turn says so.')
+               "Billing, reminding and recording wait for the owner's approval; never say an invoice or reminder was sent, a payment "
+               'recorded, or that someone paid, unless a tool result says so. You cannot add customers or change limits: only the '
+               'owner can, in the Money tab.')
 ACTS = {'send_message', 'make_payment'} | (INVOICE_TOOL_NAMES - {'check_invoices'})
 # A question about who owes what: answered from PayPal, not from the model's memory of it.
 MONEY_Q = re.compile(r"(?i)\b(?:owes?|owing|owed|unpaid|outstanding|overdue|invoices?|bills?|still due)\b")
@@ -226,6 +228,8 @@ class Kioku:
                     reply.text = answer or "(I couldn't put an answer together — please ask again in other words.)"
                     done = {e.tool for e in reply.events if e.decision == 'allow'} | {'queue' for e in reply.events if e.decision == 'ask'}
                     claims = unbacked_claims(reply.text, done, self.money_words())
+                    if self.money.on:  # "the invoice has been sent" is fine when the records show the owner approved it
+                        claims = [c for c in claims if c not in INVOICE_CLAIMS or not self.safe_claim_holds(c, reply.text)]
                     if claims:  # "Saved!" with no save, "I'll remind you" with no task, "Sent!" (never true in a turn)
                         self.keep_promises(claims, text, now, reply)
                     if self.money.on:  # "Café Hana has paid" is checked against PayPal, not taken from the model
@@ -321,6 +325,12 @@ class Kioku:
             return True
         words = {w for c in self.money.customers.all() for w in re.findall(r'\w{4,}', c.name.lower())}
         return bool(PAY_Q.search(text)) and any(re.search(rf'(?i)\b{re.escape(w)}\b', text) for w in words)
+
+    def safe_claim_holds(self, tool: str, text: str) -> bool:
+        try:
+            return self.money.claim_holds(tool, text)
+        except Exception:  # PayPal unreachable: the claim is not confirmed
+            return False
 
     def money_words(self) -> re.Pattern | None:
         """Sentences about invoices or customers: their "has been paid" is checked against PayPal instead."""

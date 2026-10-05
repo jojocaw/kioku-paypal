@@ -296,7 +296,10 @@ CLAIMS = [
                                   r"(?:\w+ )?invoice\b|\bi(?:'ve| have) (?:just |now |already )?billed\b")),
     ('send_reminder', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?sent (?:a |the |them a |her a |him a )?(?:friendly |payment )?reminder\b")),
     ('record_payment', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:recorded|logged|entered|marked) (?:the |their |his |her |that |this )?"
-                                  r"(?:payment|cash|transfer|invoice (?:#?\w+ )?as paid)\b")),
+                                  r"(?:payment|cash|transfer|invoice (?:#?\w+ )?as paid)\b"
+                                  r"|\b(?:payment|cash|transfer)\b[^.!?\n]{0,80}\b(?:has been|have been|is now) (?:recorded|logged|entered)\b"
+                                  # "Recorded ¥9,000 from Ikoi Nursery …" (money words in the sentence: "Recorded best day: 412" is not one)
+                                  r"|(?:^|[.!?:—–]\s*)(?:recorded|logged)\b(?=[^.!?\n]*(?:[¥$€£]\s?\d|\bpayment|\bpaid\b|\btransfer|\bcash\b|\binvoice))")),
 ]
 ALWAYS_UNBACKED = {'send_message', 'make_payment', 'create_invoice', 'send_reminder', 'record_payment'}  # never done inside a turn
 
@@ -308,7 +311,8 @@ NOT_DONE = {'save_memory': 'nothing was saved — passwords and card numbers are
             'queue': 'nothing was queued for your approval — ask again and it will wait in the approvals panel',
             'create_invoice': 'no invoice was sent — invoices go out through PayPal only after you approve them',
             'send_reminder': 'no reminder was sent — reminders go out only after you approve them',
-            'record_payment': 'nothing was recorded in PayPal — that waits for your approval too'}
+            'record_payment': 'nothing was recorded in PayPal — a payment is recorded only after you approve it'}
+INVOICE_CLAIMS = {'create_invoice', 'send_reminder', 'record_payment'}  # checked against the records (Money.claim_holds)
 SENTENCE = re.compile(r'[^.!?\n]+[.!?]?')
 
 

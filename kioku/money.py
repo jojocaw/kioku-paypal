@@ -207,8 +207,8 @@ class Money:
             if row['status'] in PAID:
                 return 'block', 'invoice.already_paid', f'PayPal shows #{row["number"]} ({row["customer"]}) as paid'
             if row.get('shared'):  # the public demo's starting invoices are the same PayPal invoices for every visitor
-                return ('block', 'demo.shared_invoice', f'#{row["number"]} is shared by everyone trying the demo — bill a customer '
-                        'yourself to try reminders and payments')
+                return ('block', 'demo.shared_invoice', f'#{row["number"]} is shared by everyone trying the demo, so it stays as it '
+                        'is — ask Kioku to bill a customer, then try reminders and payments on that invoice')
             if row['status'] in CLOSED:
                 return 'block', 'invoice.closed', f'PayPal shows #{row["number"]} as {row["status"].lower()}'
             due = Decimal(row['due_amount'])
@@ -323,6 +323,25 @@ class Money:
                 row = fresh[row['id']]
                 out.append({'customer': c.name, 'says': says, 'row': row, 'ok': (row['status'] in PAID) == (says == 'paid')})
         return out
+
+    def claim_holds(self, tool: str, text: str) -> bool:
+        """The reply says an invoice or a reminder went out, or a payment was recorded. True when the records show it
+        within the last day for the customer named (payments are read from PayPal) — then it is about an action the
+        owner approved earlier, not something the model pretends to have done now."""
+        since = self.clock() - timedelta(hours=24)
+        names = [c.name for c in self.customers.all() if len(norm(c.name)) >= 3 and norm(c.name) in norm(text)]
+        rows = [r for r in self.ledger.all() if not names or r['customer'] in names]
+        recent = lambda ts: bool(ts) and datetime.fromisoformat(ts) >= since  # noqa: E731
+        if tool == 'create_invoice':
+            return any(r.get('approval') not in ('', 'demo') and recent(r.get('created')) for r in rows)
+        if tool == 'send_reminder':
+            return any(recent(r.get('reminded')) for r in rows)
+        if tool == 'record_payment':
+            for r in rows[-5:]:
+                if r.get('status') not in PAID:
+                    r.update(self.refresh_one(r))
+            return any(r.get('status') == 'MARKED_AS_PAID' for r in rows)
+        return False
 
     def correction(self, v: dict) -> str:
         r, at = v['row'], self.clock().strftime('%H:%M')
