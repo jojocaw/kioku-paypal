@@ -311,3 +311,27 @@ def test_said_queued_with_nothing_queued_is_asked_again_when_the_message_was_abo
                        ('', [('create_invoice', {'customer': 'Café Hana', 'items': BREAD})]), 'Waiting for your approval.')
     k.chat("Café Hana's order: invoice them the usual bread, 40 baguettes at 320 and 24 croissants at 260.")
     assert len(k.approvals.list()) == 1
+
+
+def test_the_morning_briefing_hears_from_paypal_what_is_overdue(shop):
+    from datetime import date
+    from kioku import skills
+    k, fake, pp = billed(shop)
+    pp.invoices['INV2-TEST-0001']['detail']['payment_term']['due_date'] = '2026-10-01'  # four days late by the shop's clock
+    fake.responses.append("Café Hana's ¥19,040 is 4 days overdue.")
+    text = skills.morning_briefing(k, date(2026, 10, 5))
+    prompt = fake.sent[-1]['messages'][-1]['content']
+    assert 'Invoices still open (read from PayPal just now):' in prompt
+    assert 'Overdue:\n- #0001 · Café Hana · ¥19,040 still due · 4 days overdue' in prompt
+    assert 'overdue' in text
+
+
+def test_the_weekly_review_keeps_paypals_numbers_word_for_word(shop):
+    from kioku import skills
+    k, fake, pp = billed(shop)
+    k.memory.write('daily/2026-10-05.md', '# 2026-10-05 (Monday)\n\n## Key points\n- Billed Café Hana\n')
+    fake.responses.append(json.dumps({key: [] for key in skills.WEEKLY_KEYS} | {'summary': 'A quiet week.'}))
+    rel = skills.weekly_review(k, '2026-W41')
+    body = k.memory.read(rel)
+    assert '## Money (as PayPal stated it at the review)\nNot due yet:\n- #0001 · Café Hana · ¥19,040 still due · due 2026-10-19' in body
+    assert 'Invoices still open (read from PayPal now' in fake.sent[-1]['messages'][-1]['content']

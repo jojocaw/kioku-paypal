@@ -332,6 +332,22 @@ class Money:
         return (f"PayPal shows {r['customer']}'s invoice #{r['number']} as {state} — "
                 f"{fmt(r.get('due_amount') or r['total'], r['currency'])} still due (checked {at})")
 
+    def open_summary(self) -> str:
+        """The open invoices from the ledger (refresh first), split into overdue and not yet due — so a model writing a
+        briefing cannot blur the two."""
+        today, late, coming = self.clock().date(), [], []
+        for r in self.ledger.all():
+            if r.get('status') in CLOSED:
+                continue
+            days = (today - date.fromisoformat(r['due_date'])).days if r.get('due_date') else 0
+            due = fmt(r.get('due_amount') or r['total'], r['currency'])
+            if days > 0:
+                late.append(f'- #{r["number"]} · {r["customer"]} · {due} still due · {days} day{"s" if days != 1 else ""} overdue')
+            else:
+                coming.append(f'- #{r["number"]} · {r["customer"]} · {due} still due · due {r.get("due_date") or "on receipt"}')
+        parts = (['Overdue:'] + late if late else []) + (['Not due yet:'] + coming if coming else [])
+        return '\n'.join(parts)
+
     def line(self, r: dict) -> str:
         due = Decimal(r.get('due_amount') or r['total'])
         state = r['status'].replace('_', ' ').lower()

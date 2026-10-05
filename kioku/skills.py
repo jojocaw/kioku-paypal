@@ -143,6 +143,10 @@ def weekly_review(k, wid: str) -> str | None:
     facts = section(m.read('index.md'), 'Lasting facts')
     user = (f'Week {wid} ({days[0].isoformat()} to {days[-1].isoformat()})\n\nCurrent lasting facts:\n{facts or "(none)"}\n\n'
             f'Topics and their current state:\n{topics or "(none)"}\n\nDaily journals:\n{journals}')
+    money = money_block(k)
+    has_money = money.startswith(('Overdue:', 'Not due yet:'))
+    if has_money:  # what customers still owe, so "next week" can include chasing it
+        user += '\n\nInvoices still open (read from PayPal now; for next_week, do not copy into lasting facts):\n' + money
     data, _ = k.ask_json(task='weekly_review', system=WEEKLY_SYSTEM, user=user, keys=WEEKLY_KEYS, max_tokens=8000)
     merged = []
     for g in (data.get('merge_topics') or [])[:10]:
@@ -155,6 +159,7 @@ def weekly_review(k, wid: str) -> str | None:
                   f'## Highlights\n{bullets(data.get("highlights"))}\n\n## Patterns\n{bullets(data.get("patterns"))}\n\n'
                   f'## Decisions\n{bullets(data.get("decisions"))}\n\n## What didn\'t work\n{bullets(data.get("didnt_work"))}\n\n'
                   f'## Next week\n{bullets(data.get("next_week"))}\n\n'
+                  + (f'## Money (as PayPal stated it at the review)\n{money}\n\n' if has_money else '')
                   + (f'## Topics merged\n{bullets(merged)}\n\n' if merged else '')
                   + f'## Days\n{bullets([f"[[{d.isoformat()}]]" for d in days])}\n'))
     end = days[-1].isoformat()
@@ -222,9 +227,22 @@ def valid(y: int, mth: int, d: int) -> bool:
 # ------------------------------------------------------------------ morning
 
 BRIEFING_SYSTEM = """You are Kioku, the owner's secretary. Write this morning's briefing in the owner's language, speaking to the owner as "you": at most 5 short
-lines — what is still open from the last journal, open tasks, and (if given) one thing from the same day in the past.
+lines — what is still open from the last journal, open tasks, overdue invoices (if given, with the amounts exactly as PayPal
+states them), and (if given) one thing from the same day in the past.
 Use only the facts below. Never invent tasks, meetings, numbers or advice. If little is open, say so in one line.
 Plain text, no headings."""
+
+
+def money_block(k) -> str:
+    """The open invoices as PayPal states them right now (read live; payments found on the way go into memory).
+    '' without PayPal. Used by the briefing and the weekly review, so neither works from an old copy."""
+    if not k.money.on:
+        return ''
+    try:
+        k.check_invoices({'which': 'open'}, k.clock())  # refreshes the ledger from PayPal (and notes new payments)
+    except Exception as e:  # noqa: BLE001 — a briefing without the money line beats no briefing
+        return f'PayPal could not be read just now ({str(e)[:80]}).'
+    return k.money.open_summary()
 
 
 def morning_briefing(k, day: date) -> str:
@@ -234,7 +252,9 @@ def morning_briefing(k, day: date) -> str:
     body = m.read(m.daily(last)) if last else ''
     label = f'Last journal ({last.isoformat()}, {last.strftime("%A")})' if last else 'Last journal'
     tasks, past = m.open_tasks()[:10], m.on_this_day(day)
-    if not body and not tasks and not past:  # nothing to brief on: no model call, nothing made up
+    money = money_block(k)
+    open_money = money if money.startswith(('Overdue:', 'Not due yet:')) else ''
+    if not body and not tasks and not past and not open_money:  # nothing to brief on: no model call, nothing made up
         text = 'Nothing carried over and no open tasks. Have a good day.'
     else:
         parts = [f'Today: {day.isoformat()} ({day.strftime("%A")})',
@@ -245,6 +265,8 @@ def morning_briefing(k, day: date) -> str:
                  'Open tasks:\n' + ('\n'.join(f'- {t}' for t in tasks) or '(none)')]
         if past:
             parts.append('On this day:\n' + '\n'.join(f'- {when}: {note[:300]}' for when, note in past))
+        if open_money:
+            parts.append('Invoices still open (read from PayPal just now):\n' + open_money)
         text, _, _ = k.ask([{'role': 'system', 'content': BRIEFING_SYSTEM}, {'role': 'user', 'content': '\n\n'.join(parts)}],
                            task='briefing', max_tokens=400, temperature=0.2, for_disk=True)
     rel = m.daily(day)
