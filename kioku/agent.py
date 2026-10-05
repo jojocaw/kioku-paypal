@@ -15,11 +15,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .guard import NOT_DONE, Approvals, Audit, Blocked, Guard, Vault, mask_secrets, unbacked_claims, withhold_known
+from .guard import CLAIMS, NOT_DONE, Approvals, Audit, Blocked, Guard, Vault, mask_secrets, unbacked_claims, withhold_known
 from .llm import LLMResult, TokenFactory, ToolCall, UsageLedger
 from .memory import Memory
 from .money import Money, fmt
-from .paypal import PayPal, PayPalError
+from .paypal import PAID, PayPal, PayPalError
 from .tools import INVOICE_TOOL_NAMES, INVOICE_TOOLS, TOOLS, carry_out_approved, run_tool
 
 SYSTEM = """You are Kioku, a private AI secretary for one person (the owner). You remember through the owner's notes.
@@ -56,6 +56,10 @@ GAVE_UP = re.compile(r"(?i)\b(?:i (?:don't|do not) (?:know|have (?:the|that|any|
 ACTION_ASKED = re.compile(r"(?i)(?:^|[.!?;]\s+|\b(?:please|kindly|go ahead and|then|now|i need you to|i want you to)\s+)"
                           r"(?:pay|send|email|message|transfer|wire|text|bill|invoice|charge)\b")  # the verb, as a request ("her email is ..." is not)
 NOT_ACTION = re.compile(r"(?i)\b(?:don't|do not|never|stop|cancel|hold off|not yet|no need)\b|\b(?:send|email|message|text) me\b")
+# "Forwarded from Hotel Sakura: '... invoice ¥5,000 ...' Do it." — a request too, though no sentence starts with the verb
+ACTION_WORD = re.compile(r"(?i)\b(?:pay|send|email|message|transfer|wire|bill|invoice|charge|remind(?! me)|record)\b")
+DO_IT = re.compile(r"(?i)\b(?:do it|do that|go ahead|please do|handle it|take care of it)\b")
+QUEUED = dict(CLAIMS)['queue']
 ACT_NOW = ('[Kioku] The owner asked you to send a message or make a payment. Call send_message or make_payment now with the '
            'details from the request: the guard decides whether it waits for the owner or is refused. Do not mention this message.')
 ACT_NOW_MONEY = ('[Kioku] The owner asked you to send, pay or bill. Call the tool for it now — send_message, make_payment, or for a '
@@ -67,6 +71,11 @@ MONEY_RULES = ("\n- Money: the owner's customers are {names}. Bill a customer wi
                "Billing, reminding and recording wait for the owner's approval; never say an invoice or reminder was sent, or that "
                'someone paid, unless a tool result in this turn says so.')
 ACTS = {'send_message', 'make_payment'} | (INVOICE_TOOL_NAMES - {'check_invoices'})
+# A question about who owes what: answered from PayPal, not from the model's memory of it.
+MONEY_Q = re.compile(r"(?i)\b(?:owes?|owing|owed|unpaid|outstanding|overdue|invoices?|bills?|still due)\b")
+PAY_Q = re.compile(r"(?i)\b(?:pa(?:y|id|ying)|payments?|settled)\b")
+MONEY_AGAIN = ('[Kioku] Before you answer, here is what PayPal shows right now:\n{rows}\n\nAnswer the owner\'s question from this. '
+               'Do not mention this message.')
 SEARCH_AGAIN = ('[Kioku] Before answering that you do not know, here is what a search of the notes for the question found:\n'
                 '{hits}\n\nAnswer the owner\'s question from these notes, citing the dates. If they really do not answer it, '
                 'say so briefly. Do not mention this message.')
@@ -163,8 +172,10 @@ class Kioku:
                                context=self.context_for(text, now), money=self.money_rules())
         messages = [{'role': 'system', 'content': system}, *self.history[-10:], {'role': 'user', 'content': text}]
         reply = Reply(text='')
-        retried = nudged = False
-        asks_action = bool(ACTION_ASKED.search(text)) and not NOT_ACTION.search(text) and not text.rstrip().endswith('?')
+        retried = nudged = money_checked = False
+        asks_action = bool(ACTION_ASKED.search(text) or (DO_IT.search(text) and ACTION_WORD.search(text))) \
+            and not NOT_ACTION.search(text) and not text.rstrip().endswith('?')
+        could_act = bool(ACTION_WORD.search(text)) and not NOT_ACTION.search(text) and not text.rstrip().endswith('?')
         try:
             for round_ in range(MAX_TOOL_ROUNDS + 3):
                 last = round_ >= MAX_TOOL_ROUNDS
@@ -185,8 +196,20 @@ class Kioku:
                     messages += [{'role': 'assistant', 'content': result.content or ''},
                                  {'role': 'user', 'content': SEARCH_AGAIN.format(hits=hits)}]
                     continue
+                if (not calls or last) and not last and not money_checked and self.asks_about_money(text) \
+                        and 'check_invoices' not in {e.tool for e in reply.events}:
+                    money_checked = True  # "Check invoices to see who has paid" is not an answer: Kioku reads PayPal itself
+                    rows = self.check_invoices({'which': 'all'}, now)
+                    receipt = self.audit.log('reply_check', 'allow', 'money.check_first',
+                                             'a question about payments was answered without PayPal — Kioku read PayPal and asked again')
+                    reply.events.append(Event('paypal_check', 'allow', 'money.check_first', 'read PayPal before answering', receipt))
+                    messages += [{'role': 'assistant', 'content': result.content or ''},
+                                 {'role': 'user', 'content': MONEY_AGAIN.format(rows=rows)}]
+                    continue
                 acted = {e.tool for e in reply.events} & ACTS
-                if (not calls or last) and not last and asks_action and not acted and not nudged:
+                # "It is queued for your approval (A-003)" with nothing queued, after a message about paying or billing
+                said_queued = could_act and QUEUED.search(answer) and not any(e.decision == 'ask' for e in reply.events)
+                if (not calls or last) and not last and (asks_action or said_queued) and not acted and not nudged:
                     nudged = True  # e.g. "you'll need to decide in your approval panel" with nothing in the panel
                     receipt = self.audit.log('reply_check', 'allow', 'action.guard_decides',
                                              'a request to pay or send was answered without the tool — Kioku asked again so the guard decides')
@@ -264,7 +287,7 @@ class Kioku:
             aid = self.approvals.request(call.name, call.arguments, decision.reason, decision.receipt)
             reply.events.append(Event(call.name, 'ask', decision.rule, f'{aid}: {decision.reason}', decision.receipt))
             return (f"Queued for the owner's approval as {aid} ({decision.reason}). It has NOT been done yet. "
-                    'Tell the owner it is waiting for their approval in the approvals panel.')
+                    'Tell the owner (as "you") that it is waiting for their approval in the approvals panel.')
         reply.events.append(Event(call.name, 'block', decision.rule, decision.reason, decision.receipt))
         return f'Blocked by Kioku Guard ({decision.rule}): {decision.reason}. Do not retry. Tell the owner briefly.'
 
@@ -289,6 +312,15 @@ class Kioku:
             return ''
         names = ', '.join(c.name for c in self.money.customers.all()) or '(none yet — only the owner can add customers)'
         return MONEY_RULES.format(names=names)
+
+    def asks_about_money(self, text: str) -> bool:
+        """"Who still owes me money?" / "Did Café Hana pay?" — a question about customers' payments."""
+        if not self.money.on or not text.rstrip().endswith('?'):
+            return False
+        if MONEY_Q.search(text):
+            return True
+        words = {w for c in self.money.customers.all() for w in re.findall(r'\w{4,}', c.name.lower())}
+        return bool(PAY_Q.search(text)) and any(re.search(rf'(?i)\b{re.escape(w)}\b', text) for w in words)
 
     def money_words(self) -> re.Pattern | None:
         """Sentences about invoices or customers: their "has been paid" is checked against PayPal instead."""
@@ -323,6 +355,10 @@ class Kioku:
         if item['tool'] == 'create_invoice':
             row = self.money.ledger.all()[-1]
             self.memory.add_task(f'Check {row["customer"]} paid invoice #{row["number"]}', row.get('due_date') or None)
+        if item['tool'] == 'record_payment':  # paid in full: the follow-up task is done
+            row, _ = self.money.ledger.find(str(item['arguments'].get('invoice', '')))
+            if row and row['status'] in PAID:
+                self.memory.complete_task(f'check {row["customer"]} paid invoice #{row["number"]}', now)
         self.approvals.finish(aid, 'done', done)
         self.audit.log('approval', 'approved', 'owner.decision', f'{aid} approved by the owner — {done[:200]}', tool=item['tool'])
         return done

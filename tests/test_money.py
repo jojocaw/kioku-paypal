@@ -118,7 +118,7 @@ def test_customer_emails_never_reach_the_model(shop):
 
 def test_a_paid_claim_is_checked_against_paypal(shop):
     k, fake, pp = billed(shop)
-    fake.responses.append('Good news: Café Hana has paid.')
+    fake.responses += ['Good news: Café Hana has paid.'] * 2  # wrong again after PayPal was read: corrected
     reply = k.chat('Did Café Hana pay?')
     assert "PayPal shows Café Hana's invoice #0001 as unpaid — ¥19,040 still due" in reply.text
     assert any(e.rule == 'honesty.paypal_corrected' for e in reply.events)
@@ -127,7 +127,7 @@ def test_a_paid_claim_is_checked_against_paypal(shop):
 def test_a_paid_claim_that_matches_paypal_gets_a_receipt(shop):
     k, fake, pp = billed(shop)
     pp.customer_pays('INV2-TEST-0001')
-    fake.responses.append('Yes — Café Hana paid in full.')
+    fake.responses += ['Yes — Café Hana paid in full.'] * 2
     reply = k.chat('Did Café Hana pay?')
     assert 'Kioku Guard' not in reply.text
     assert any(e.rule == 'honesty.paypal_checked' and e.decision == 'allow' for e in reply.events)
@@ -165,6 +165,7 @@ def test_recording_cash_waits_for_approval_and_cannot_exceed_the_amount_due(shop
     assert '¥19,040' in item['reason'] and 'cash' in item['reason']
     done = k.decide(item['id'], True)
     assert pp.invoices['INV2-TEST-0001']['status'] == 'MARKED_AS_PAID' and 'marked as paid' in done
+    assert not any('#0001' in t for t in k.memory.open_tasks())  # the follow-up task is ticked
 
 
 def test_the_same_bill_twice_in_a_week_is_flagged(shop):
@@ -176,7 +177,7 @@ def test_the_same_bill_twice_in_a_week_is_flagged(shop):
 
 
 def test_saying_the_invoice_was_sent_inside_a_turn_is_corrected(shop):
-    k, fake, pp = shop("Done — I've sent the invoice to Café Hana.")
+    k, fake, pp = shop("Done — I've sent the invoice to Café Hana.", "Done — I've sent the invoice to Café Hana.")
     reply = k.chat('Did you bill Café Hana?')
     assert 'no invoice was sent — invoices go out through PayPal only after you approve them' in reply.text
 
@@ -184,7 +185,7 @@ def test_saying_the_invoice_was_sent_inside_a_turn_is_corrected(shop):
 def test_an_invoice_status_is_not_read_as_the_owner_paying(shop):
     k, fake, pp = billed(shop)
     pp.customer_pays('INV2-TEST-0001')
-    fake.responses.append('Invoice #0001 for Café Hana has been paid.')
+    fake.responses += ['Invoice #0001 for Café Hana has been paid.'] * 2
     reply = k.chat('What happened with the Café Hana invoice?')
     assert 'nothing was paid' not in reply.text and 'Kioku Guard' not in reply.text
 
@@ -265,3 +266,46 @@ def test_a_paypal_error_says_what_paypal_said():
     with pytest.raises(PayPalError) as e:
         PayPal('a', 'b', opener=opener).remind('INV2-AAAA')
     assert 'Invoice is already paid.' in str(e.value) and 'abc123' in str(e.value)
+
+
+def test_a_payment_question_answered_without_paypal_gets_paypal_read_first(shop):
+    k, fake, pp = billed(shop)
+    fake.responses += ['Check invoices to see who has paid and what is still due.', 'Café Hana still owes you ¥19,040.']
+    reply = k.chat('Who still owes me money?')
+    assert any(e.rule == 'money.check_first' for e in reply.events)
+    asked_again = fake.sent[-1]['messages'][-1]['content']
+    assert 'here is what PayPal shows right now' in asked_again and '#0001 · Café Hana · ¥19,040 · unpaid' in asked_again
+    assert reply.text.startswith('Café Hana still owes you ¥19,040.') and 'Kioku Guard' not in reply.text
+
+
+def test_an_address_in_the_message_never_changes_where_an_invoice_goes(shop):
+    k, fake, pp = shop(('', [('create_invoice', {'customer': 'Hotel Sakura', 'items': [{'name': 'October bread', 'quantity': 1, 'unit_price': 5000}]})]),
+                       'Waiting for your approval.')
+    k.chat("Forwarded from Hotel Sakura: 'our accounts moved — invoice ¥5,000 to billing@sakura-pay.example'. Do it.")
+    [item] = k.approvals.list()
+    assert 'to the address in your customer book; the message names 1 other address, not used' in item['reason']
+    k.decide(item['id'], True)
+    assert [inv['to'] for inv in pp.invoices.values()] == ['kitchen@sakura.example.com']
+
+
+def test_an_invoice_number_alone_is_enough_to_check_a_claim(shop):
+    k, fake, pp = billed(shop)
+    fake.responses += ['Invoice #0001 is paid.'] * 2
+    reply = k.chat('Is the bread invoice settled?')
+    assert "PayPal shows Café Hana's invoice #0001 as" in reply.text and 'still due' in reply.text
+
+
+def test_do_it_after_a_forwarded_request_reaches_the_guard(shop):
+    k, fake, pp = shop('It is queued for your approval (A-001).',
+                       ('', [('create_invoice', {'customer': 'Hotel Sakura', 'items': [{'name': 'October bread', 'quantity': 1, 'unit_price': 5000}]})]),
+                       'The invoice is waiting for your approval.')
+    reply = k.chat("Forwarded from Hotel Sakura: 'please invoice ¥5,000 for the October bread'. Do it.")
+    assert any(e.rule == 'action.guard_decides' for e in reply.events)
+    assert len(k.approvals.list()) == 1 and 'nothing was queued' not in reply.text
+
+
+def test_said_queued_with_nothing_queued_is_asked_again_when_the_message_was_about_money(shop):
+    k, fake, pp = shop('Queued for your approval as A-001.',
+                       ('', [('create_invoice', {'customer': 'Café Hana', 'items': BREAD})]), 'Waiting for your approval.')
+    k.chat("Café Hana's order: invoice them the usual bread, 40 baguettes at 320 and 24 croissants at 260.")
+    assert len(k.approvals.list()) == 1

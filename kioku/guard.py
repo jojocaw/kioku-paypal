@@ -443,7 +443,7 @@ class Guard:
                 action, rule, reason = 'block', 'paypal.off', 'PayPal is not connected'
             else:
                 try:
-                    action, rule, reason = self.money.check(call.name, call.arguments)
+                    action, rule, reason = self.money.check(call.name, call.arguments, context)
                 except Exception as e:  # PayPal unreachable or refusing: nothing is queued on a guess
                     action, rule, reason = 'block', 'paypal.unreachable', f'could not check with PayPal ({str(e)[:160]})'
         else:

@@ -167,8 +167,9 @@ class Money:
         return self.paypal is not None
 
     # ------------------------------------------------------------ the guard's checks (owner side, real values)
-    def check(self, name: str, args: dict) -> tuple[str, str, str]:
-        """(action, rule, reason) for an invoice tool. Reads PayPal when a status matters; never writes."""
+    def check(self, name: str, args: dict, context: str = '') -> tuple[str, str, str]:
+        """(action, rule, reason) for an invoice tool. Reads PayPal when a status matters; never writes.
+        context: the owner's message — an email address in it never changes where an invoice goes."""
         if not self.on:
             return 'block', 'paypal.off', 'PayPal is not connected'
         if name == 'check_invoices':
@@ -186,6 +187,9 @@ class Money:
             if total > self.max_invoice:
                 return 'block', 'invoice.limit', f'{fmt(total, self.currency)} is over the limit of {fmt(self.max_invoice, self.currency)} per invoice'
             reason = f'bill {cust.name} {fmt(total, self.currency)} through PayPal ({describe_items(items, self.currency)})'
+            others = {e.lower() for e in re.findall(r'[\w.%+-]+@[\w-]+(?:\.[\w-]+)+', context or '')} - {cust.email.lower()}
+            if others:
+                reason += f' — to the address in your customer book; the message names {len(others)} other address' + ('es' if len(others) > 1 else '') + ', not used'
             since = self.clock() - timedelta(days=REPEAT_DAYS)
             repeat = [r for r in self.ledger.all() if r['customer'] == cust.name and Decimal(r['total']) == total
                       and r.get('status') != 'CANCELLED' and datetime.fromisoformat(r['created']) >= since]
@@ -301,8 +305,9 @@ class Money:
             if not says:
                 continue
             numbers = {n.lstrip('0') for n in re.findall(r'#\s?(\d+)', sentence)}
+            named_in = {r['customer'] for r in rows if r.get('number', '').lstrip('0') in numbers}  # "#0003 is still unpaid"
             for c in customers:
-                if norm(c.name) not in norm(sentence):
+                if norm(c.name) not in norm(sentence) and c.name not in named_in:
                     continue
                 theirs = [r for r in rows if r['customer'] == c.name]
                 if not theirs:
