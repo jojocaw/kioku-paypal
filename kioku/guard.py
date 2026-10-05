@@ -295,8 +295,8 @@ CLAIMS = [
     ('create_invoice', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:sent|issued|created|emailed) (?:the |an |a |your |their )?"
                                   r"(?:\w+ )?invoice\b|\bi(?:'ve| have) (?:just |now |already )?billed\b")),
     ('send_reminder', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?sent (?:a |the |them a |her a |him a )?(?:friendly |payment )?reminder\b")),
-    ('record_payment', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:recorded|logged|entered|marked) (?:the |their |his |her |that |this )?"
-                                  r"(?:payment|cash|transfer|invoice (?:#?\w+ )?as paid)\b"
+    ('record_payment', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:recorded|logged|entered|marked)\b[^.!?\n]{0,40}?"
+                                  r"\b(?:payments?|cash|transfers?|deposits?|as paid)\b"
                                   r"|\b(?:payment|cash|transfer)\b[^.!?\n]{0,80}\b(?:has been|have been|is now) (?:recorded|logged|entered)\b"
                                   # "Recorded ¥9,000 from Ikoi Nursery …" (money words in the sentence: "Recorded best day: 412" is not one)
                                   r"|(?:^|[.!?:—–]\s*)(?:recorded|logged)\b(?=[^.!?\n]*(?:[¥$€£]\s?\d|\bpayment|\bpaid\b|\btransfer|\bcash\b|\binvoice))")),
@@ -321,14 +321,13 @@ def unbacked_claims(text: str, done: set[str], money_words: re.Pattern | None = 
     something was queued for the owner). money_words: sentences about invoices or customers are checked against PayPal
     instead (money.verify), so "invoice #0007 has been paid" there is not read as the owner paying someone."""
     found = []
-    for tool, rx in CLAIMS:
-        if tool in done and tool not in ALWAYS_UNBACKED:
-            continue
-        for sentence in (m.strip() for m in SENTENCE.findall(text or '')):
-            if rx.search(sentence) and not (money_words and tool in ('send_message', 'make_payment') and money_words.search(sentence)):
-                found.append(tool)
-                break
-    return found
+    for sentence in (m.strip() for m in SENTENCE.findall(text or '')):
+        hits = [tool for tool, rx in CLAIMS if (tool not in done or tool in ALWAYS_UNBACKED) and rx.search(sentence)
+                and not (money_words and tool in ('send_message', 'make_payment') and money_words.search(sentence))]
+        if 'record_payment' in hits:  # "I've recorded the ¥9,000 transfer" is about PayPal, not a note in memory
+            hits = [t for t in hits if t != 'save_memory']
+        found += [t for t in hits if t not in found]
+    return [tool for tool, _ in CLAIMS if tool in found]
 
 
 class Approvals:

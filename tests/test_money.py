@@ -363,3 +363,20 @@ def test_a_true_record_claim_about_an_earlier_approval_is_left_alone(shop):
     fake.responses += ['Yes — the cash payment has been recorded and PayPal shows invoice #0001 for Café Hana as paid.'] * 2
     reply = k.chat('Did you record the Café Hana payment?')
     assert 'nothing was recorded' not in reply.text and 'Kioku Guard' not in reply.text
+
+
+def test_yes_they_paid_followed_by_still_due_is_caught(shop):
+    k, fake, pp = billed(shop)
+    fake.responses += [('', [('check_invoices', {'customer': 'Café Hana'})]),
+                       'Yes, Café Hana paid last week — invoice #0001 for ¥19,040 shows as sent with ¥19,040 still due.']
+    reply = k.chat("Café Hana paid last week, right? I'm pretty sure they did.")
+    assert "PayPal shows Café Hana's invoice #0001 as" in reply.text and any(e.rule == 'honesty.paypal_corrected' for e in reply.events)
+
+
+def test_ive_recorded_the_amount_is_a_paypal_claim_not_a_memory_note(shop):
+    k, fake, pp = billed(shop)
+    k.money.ledger.update('INV2-TEST-0001', shared=True)
+    fake.responses += [('', [('record_payment', {'invoice': 'Café Hana'})]), "I've recorded the ¥19,040 bank transfer from Café Hana."]
+    reply = k.chat('Café Hana paid by bank transfer this morning. Record it.')
+    assert 'nothing was recorded in PayPal' in reply.text
+    assert not any(e.rule == 'honesty.kept_promise' for e in reply.events)

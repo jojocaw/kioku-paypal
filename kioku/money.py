@@ -302,8 +302,11 @@ class Money:
         customers = [c for c in self.customers.all() if len(norm(c.name)) >= 3]
         rows = self.ledger.all()
         out, fresh = [], {}
-        for sentence in (m.strip() for m in SENTENCE.findall(text or '')):
-            if not sentence or sentence.endswith('?'):
+        # clause by clause: "Yes, Hotel Sakura paid last week — #0006 still has ¥36,600 due" says both, and each is checked
+        clauses = [c.strip() for m in SENTENCE.findall(text or '') if not m.strip().endswith('?')
+                   for c in re.split(r'\s[—–]\s|;\s|:\s|,\s(?=but\b)', m)]
+        for sentence in clauses:
+            if not sentence:
                 continue
             says = 'unpaid' if SAYS_UNPAID.search(sentence) else 'paid' if SAYS_PAID.search(sentence) else ''
             if not says:
