@@ -110,7 +110,8 @@ await page.addInitScript(() => {
       transition: outline-color .2s; }
     .rec-glow { box-shadow: inset 0 0 0 3px #f59e0b !important; background: #fff7e6 !important; }
     .rec-mark { background: #fff4d6 !important; border-radius: 4px; }
-    #run-out::after, #note::after { content: ''; display: block; height: 380px; }  /* room to scroll a section to the top */`;
+    #run-out::after, #note::after { content: ''; display: block; height: 380px; }  /* room to scroll a section to the top */
+    #tree { position: sticky; top: 0; align-self: start; }  /* the file list stays in view while a long note scrolls */`;
   addEventListener('DOMContentLoaded', () => {
     const s = document.createElement('style'); s.textContent = css; document.head.append(s);
   });
