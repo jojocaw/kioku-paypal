@@ -519,7 +519,7 @@ if (await seen.count() && at() < LATEST.seenToggle) {
   const box = page.locator('#msgs .msg.me').last().locator('.seen');
   await box.scrollIntoViewIfNeeded().catch(() => {});
   await ring(box.locator('.ph'));
-  await caption('The model never sees an email address — not even the one in the message.');
+  await caption('The model saw only a placeholder, not the address. Kioku shows the real one back on the owner’s screen only.');
 }
 const scamBill = approvalOf(scam.events, 'create_invoice');
 if (scamBill) {
