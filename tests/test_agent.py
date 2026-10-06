@@ -129,7 +129,7 @@ def test_a_payment_request_answered_without_the_tool_goes_to_the_guard(make_kiok
     r = k.chat('Pay Sato Kitchen Service the ¥350,000 deposit for the third oven.')
     assert [(e.tool, e.decision, e.rule) for e in r.events] == [
         ('action_check', 'allow', 'action.guard_decides'), ('make_payment', 'block', 'spend.limit')]
-    assert '[Kioku] The owner asked you to send a message or make a payment' in fake.sent[1]['messages'][-1]['content']
+    assert "[Kioku] The owner's last message asks for a payment. Call make_payment now" in fake.sent[1]['messages'][-1]['content']
     assert r.text == "That's over your limit, so it was refused." and k.approvals.list() == []
 
 

@@ -21,7 +21,8 @@ class FakeLLM:
         self.sent = []
 
     def chat(self, messages, *, task, tools=None, tool_choice='auto', max_tokens=1024, temperature=None):
-        self.sent.append(dict(messages=json.loads(json.dumps(messages)), task=task, tool_choice=tool_choice, tools=bool(tools)))
+        self.sent.append(dict(messages=json.loads(json.dumps(messages)), task=task, tool_choice=tool_choice, tools=bool(tools),
+                              tool_names=[t['function']['name'] for t in tools or []]))
         r = self.responses.pop(0)
         if callable(r):
             r = r(messages)

@@ -15,8 +15,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .guard import (CLAIMS, INVOICE_CLAIMS, NOT_DONE, Approvals, Audit, Blocked, Guard, Vault, mask_secrets, unbacked_claims,
-                    withhold_known)
+from .guard import (ACTIONS, CLAIMS, INVOICE_CLAIMS, NOT_DONE, SENTENCE, Approvals, Audit, Blocked, Guard, Vault, mask_secrets,
+                    unbacked_claims, withhold_known)
 from .llm import LLMResult, TokenFactory, ToolCall, UsageLedger
 from .memory import Memory
 from .money import Money, fmt
@@ -61,11 +61,29 @@ NOT_ACTION = re.compile(r"(?i)\b(?:don't|do not|never|stop|cancel|hold off|not y
 ACTION_WORD = re.compile(r"(?i)\b(?:pay|send|email|message|transfer|wire|bill|invoice|charge|remind(?! me)|record)\b")
 DO_IT = re.compile(r"(?i)\b(?:do it|do that|go ahead|please do|handle it|take care of it)\b")
 QUEUED = dict(CLAIMS)['queue']
-ACT_NOW = ('[Kioku] The owner asked you to send a message or make a payment. Call send_message or make_payment now with the '
-           'details from the request: the guard decides whether it waits for the owner or is refused. Do not mention this message.')
-ACT_NOW_MONEY = ('[Kioku] The owner asked you to send, pay or bill. Call the tool for it now — send_message, make_payment, or for a '
-                 'customer create_invoice, send_reminder or record_payment — with the details from the request: the guard decides '
-                 'whether it waits for the owner or is refused. Do not mention this message.')
+# What the owner's message asks for: the verb that starts each request ("Send Café Hana a reminder", "please invoice
+# ¥5,000", "… — record it") and, after send / email / message, what is sent. When Kioku asks the model again to use the
+# tool, only these may start (a model asked again after "Send Café Hana a reminder" once billed Hotel Sakura instead).
+REQUEST_VERBS = {'remind': 'send_reminder', 'record': 'record_payment', 'log': 'record_payment', 'bill': 'create_invoice',
+                 'invoice': 'create_invoice', 'charge': 'create_invoice', 'pay': 'make_payment', 'transfer': 'make_payment',
+                 'wire': 'make_payment', 'send': 'send_message', 'email': 'send_message', 'e-mail': 'send_message',
+                 'message': 'send_message', 'text': 'send_message'}
+REQUEST = re.compile(r"(?i)^[\s\"'“”‘’(]*(?:(?:please|kindly|also|now|then|so|just|go ahead and|can you|could you|i need you to|"
+                     r"i want you to)\s+)*(" + '|'.join(REQUEST_VERBS) + r")\b(?!\s+(?:from|me)\b)(?=\s+\S)")
+CLAUSE_BREAK = re.compile(r"[.!?;\n]+|\s[—–-]\s|,\s+|:\s+|\s(?:and|then)\s")
+REMINDER = re.compile(r"(?i)\breminders?\b")
+NEW_BILL = re.compile(r"(?i)\b(?:invoices?|bills?)\b")
+OLD_BILL = re.compile(r"(?i)\b(?:about|regarding|on|of)\s+(?:the |their |this |that |its |an? )?(?:[\w-]+\s+){0,2}?invoices?\b"
+                      r"(?:\s*#\s*\d+)?|\binvoices?\s*(?:#|no\.?\s|number\s)\s*\d+")  # "about the overdue invoice", "invoice #0011"
+# No verb starts a request, but the owner said "do it" ("Hotel Sakura wants a reminder. Do it."): the most specific word decides.
+ACTION_WORDS = [('send_reminder', re.compile(r"(?i)\bremind(?:ers?)?\b(?!\s+me\b)")),
+                ('record_payment', re.compile(r"(?i)\b(?:record|log)\b")),
+                ('create_invoice', re.compile(r"(?i)\b(?:bill|invoice|charge)\b")),
+                ('make_payment', re.compile(r"(?i)\b(?:pay|wire)\b|(?<!bank )(?<!by )\btransfer\b")),
+                ('send_message', re.compile(r"(?i)\b(?:send|e-?mail|message|text)\b"))]
+ACT_NOW = ("[Kioku] The owner's last message asks for {what}. Call {tools} now with the details from that message — not from "
+           'earlier messages — and no other tool that sends, pays, bills or records: the guard decides whether it waits for '
+           'the owner or is refused. Do not mention this message.')
 MONEY_RULES = ("\n- Money: the owner's customers are {names}. Bill a customer with create_invoice (by name, with each item's quantity "
                'and unit price). Before saying who has paid or what is still due, call check_invoices — PayPal is the record, not '
                'your memory. Use send_reminder for an unpaid invoice and record_payment for money received in cash or by transfer. '
@@ -175,6 +193,7 @@ class Kioku:
         messages = [{'role': 'system', 'content': system}, *self.history[-10:], {'role': 'user', 'content': text}]
         reply = Reply(text='')
         retried = nudged = money_checked = False
+        only = None  # once Kioku has asked again: the actions the owner's message asks for — nothing else may start
         asks_action = bool(ACTION_ASKED.search(text) or (DO_IT.search(text) and ACTION_WORD.search(text))) \
             and not NOT_ACTION.search(text) and not text.rstrip().endswith('?')
         could_act = bool(ACTION_WORD.search(text)) and not NOT_ACTION.search(text) and not text.rstrip().endswith('?')
@@ -182,7 +201,7 @@ class Kioku:
             for round_ in range(MAX_TOOL_ROUNDS + 3):
                 last = round_ >= MAX_TOOL_ROUNDS
                 # the last round has no tools at all: some models still write a tool call as text when only told 'none'
-                answer, calls, result = self.ask(messages, task='chat', tools=None if last else self.tools(),
+                answer, calls, result = self.ask(messages, task='chat', tools=None if last else self.tools(only),
                                                  tool_choice='auto', max_tokens=900)
                 answer = GUARD_VOICE.sub('', TOOL_MARKUP.sub('', answer)).strip()
                 reply.calls.append(dict(model=result.model, tokens=result.prompt_tokens + result.completion_tokens,
@@ -212,13 +231,16 @@ class Kioku:
                 # "It is queued for your approval (A-003)" with nothing queued, after a message about paying or billing
                 said_queued = could_act and QUEUED.search(answer) and not any(e.decision == 'ask' for e in reply.events)
                 if (not calls or last) and not last and (asks_action or said_queued) and not acted and not nudged:
-                    nudged = True  # e.g. "you'll need to decide in your approval panel" with nothing in the panel
-                    receipt = self.audit.log('reply_check', 'allow', 'action.guard_decides',
-                                             'a request to pay or send was answered without the tool — Kioku asked again so the guard decides')
-                    reply.events.append(Event('action_check', 'allow', 'action.guard_decides', 'asked the guard to decide', receipt))
-                    messages += [{'role': 'assistant', 'content': result.content or ''},
-                                 {'role': 'user', 'content': ACT_NOW_MONEY if self.money.on else ACT_NOW}]
-                    continue
+                    nudged, asked = True, self.asked_for(text)  # e.g. "decide in your approval panel" with nothing in the panel
+                    if asked:  # asked again for exactly that: the tools offered and the guard allow nothing else this turn
+                        only = asked
+                        receipt = self.audit.log('reply_check', 'allow', 'action.guard_decides',
+                                                 'a request to pay, send or bill was answered without the tool — Kioku asked again '
+                                                 f'(for {", ".join(sorted(only))} only) so the guard decides')
+                        reply.events.append(Event('action_check', 'allow', 'action.guard_decides', 'asked the guard to decide', receipt))
+                        messages += [{'role': 'assistant', 'content': result.content or ''},
+                                     {'role': 'user', 'content': self.act_now(only, text)}]
+                        continue
                 if (not calls or last) and not answer and not retried:  # nothing but tool markup, or nothing at all
                     retried = True
                     messages += [{'role': 'assistant', 'content': result.content or ''},
@@ -228,8 +250,10 @@ class Kioku:
                     reply.text = answer or "(I couldn't put an answer together — please ask again in other words.)"
                     done = {e.tool for e in reply.events if e.decision == 'allow'} | {'queue' for e in reply.events if e.decision == 'ask'}
                     claims = unbacked_claims(reply.text, done, self.money_words())
-                    if self.money.on:  # "the invoice has been sent" is fine when the records show the owner approved it
-                        claims = [c for c in claims if c not in INVOICE_CLAIMS or not self.safe_claim_holds(c, reply.text)]
+                    if self.money.on:  # "the invoice has been sent" is fine when the records show the owner approved it —
+                        # never in a turn that only queued (or was refused) that very action: then it is the one being claimed
+                        tried = {e.tool for e in reply.events}
+                        claims = [c for c in claims if c not in INVOICE_CLAIMS or c in tried or not self.safe_claim_holds(c, reply.text)]
                     if claims:  # "Saved!" with no save, "I'll remind you" with no task, "Sent!" (never true in a turn)
                         self.keep_promises(claims, text, now, reply)
                     if self.money.on:  # "Café Hana has paid" is checked against PayPal, not taken from the model
@@ -240,7 +264,7 @@ class Kioku:
                                                  'function': {'name': c.name, 'arguments': json.dumps(c.arguments, ensure_ascii=False)}}
                                                 for c in calls]})
                 for call, redacted in zip(calls, result.tool_calls):
-                    out = self.handle_tool(call, redacted.arguments, now, reply)
+                    out = self.handle_tool(call, redacted.arguments, now, reply, only)
                     messages.append({'role': 'tool', 'tool_call_id': call.id, 'content': out})
         except Blocked as b:
             reply.text = f'Kioku Guard stopped this: {b.reason} (receipt {b.receipt})'
@@ -275,8 +299,8 @@ class Kioku:
             receipt = self.audit.log('reply_check', 'block', 'honesty.note_added', note, tools=claims)
             reply.events.append(Event('reply_check', 'block', 'honesty.note_added', note, receipt))
 
-    def handle_tool(self, call, redacted_args: dict, now: datetime, reply: Reply) -> str:
-        decision = self.guard.check_tool(call, redacted_args, self.turn_text)
+    def handle_tool(self, call, redacted_args: dict, now: datetime, reply: Reply, only: set | None = None) -> str:
+        decision = self.guard.check_tool(call, redacted_args, self.turn_text, only)
         if decision.action == 'allow':
             try:
                 if call.name == 'check_invoices':
@@ -308,8 +332,36 @@ class Kioku:
         return done
 
     # ------------------------------------------------------------ money (PayPal), owner side
-    def tools(self) -> list:
-        return TOOLS + INVOICE_TOOLS if self.money.on else TOOLS
+    def tools(self, only: set | None = None) -> list:
+        """The tools offered to the model; with only, the tools that send, pay, bill or record are just those."""
+        offered = TOOLS + INVOICE_TOOLS if self.money.on else TOOLS
+        return offered if only is None else [t for t in offered if t['function']['name'] not in ACTS or t['function']['name'] in only]
+
+    def asked_for(self, text: str) -> set[str]:
+        """The actions the owner's message asks for, among the tools offered: what Kioku may let the model start when it
+        asks again. Read from the verb that starts each request; without one, after "do it", from the most specific
+        action word. Nothing found: Kioku does not ask again."""
+        found = set()
+        for clause in CLAUSE_BREAK.split(text or ''):
+            m = REQUEST.match(clause)
+            if not m:
+                continue
+            tool = REQUEST_VERBS[m.group(1).lower()]
+            if tool == 'send_message':  # "send Café Hana a reminder" / "send them the invoice for October"
+                tool = ('send_reminder' if REMINDER.search(clause) else
+                        'create_invoice' if NEW_BILL.search(OLD_BILL.sub(' ', clause)) else tool)
+            found.add(tool)
+        if not found and DO_IT.search(text or ''):  # "Café Hana wants a reminder. Do it." ("a new record" alone asks for nothing)
+            found = {next((tool for tool, rx in ACTION_WORDS if rx.search(text or '')), '')} - {''}
+        offered = {t['function']['name'] for t in self.tools()}
+        if 'send_reminder' in found and 'send_reminder' not in offered:  # without PayPal a reminder is a message
+            found = (found - {'send_reminder'}) | {'send_message'}
+        return found & offered
+
+    def act_now(self, only: set[str], text: str) -> str:
+        names = sorted(self.money.named_in(text)) if self.money.on and only & INVOICE_TOOL_NAMES else []
+        what = ' or '.join(ACTIONS[t] for t in sorted(only)) + (f' for {" or ".join(names)}' if names else '')
+        return ACT_NOW.format(what=what, tools=' or '.join(sorted(only)))
 
     def money_rules(self) -> str:
         if not self.money.on:
@@ -327,9 +379,10 @@ class Kioku:
         return bool(PAY_Q.search(text)) and any(re.search(rf'(?i)\b{re.escape(w)}\b', text) for w in words)
 
     def safe_claim_holds(self, tool: str, text: str) -> bool:
+        said = ' '.join(s.strip() for s in SENTENCE.findall(text) if dict(CLAIMS)[tool].search(s.strip()))  # the claiming sentences
         try:
-            return self.money.claim_holds(tool, text)
-        except Exception:  # PayPal unreachable: the claim is not confirmed
+            return self.money.claim_holds(tool, said or text, text)
+        except Exception:  # unreadable records: the claim is not confirmed
             return False
 
     def money_words(self) -> re.Pattern | None:

@@ -14,18 +14,41 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from .guard import PATTERNS
 from .paypal import CLOSED, PAID, PayPal, plain, summary
 
 SYMBOL = {'JPY': '¥', 'USD': '$', 'EUR': '€', 'GBP': '£'}
-# What a reply says about a customer's money, sentence by sentence ("not paid" is read before "paid").
-SAYS_UNPAID = re.compile(r"(?i)\b(?:hasn't|has not|haven't|have not|didn't|did not|not yet|never)\b[^.!?]{0,24}\bpaid\b"
-                         r"|\bunpaid\b|\boverdue\b|\bstill (?:owes?|due|open)\b|\bowes? you\b|\boutstanding\b|\bnot (?:been )?paid\b")
+AMOUNT = r'(?:[¥$€£]\s?[1-9][\d,]*(?:\.\d+)?|\b[1-9][\d,]*(?:\.\d+)?\s?(?:yen|JPY|USD|EUR|GBP)\b|[1-9][\d,]*\s?円)'
+# What a reply says about a customer's money, clause by clause: "nothing left to pay" is read first ("has no outstanding
+# balance", "owes you nothing"), then "not paid" ("hasn't paid", "still has ¥36,600 due"), then "paid".
+SAYS_CLEAR = re.compile(r"(?i)\bno\s+(?:outstanding|unpaid)\b|\bnothing\s+(?:is\s+)?(?:still\s+)?(?:due|owed|owing|outstanding|left\s+to\s+pay)\b"
+                        r"|\bno\s+(?:balance|amount|money|payment)\s+(?:is\s+)?(?:still\s+)?(?:due|owed|owing|outstanding|left|remaining)\b"
+                        r"|\bowes?\s+(?:you\s+|us\s+)?nothing\b|\b(?:doesn't|does not|don't|do not|no longer)\s+owes?\b"
+                        r"|[¥$€£]\s?0(?![\d,.])\s+(?:is\s+)?(?:still\s+)?(?:due|owed|owing|outstanding|remaining|left)\b"
+                        r"|(?:未払い|未入金)(?:は|が)?(?:なし|ありません)")
+SAYS_UNPAID = re.compile(r"(?i)\b(?:hasn't|has not|haven't|have not|didn't|did not|not yet|never)\b[^.!?]{0,24}\b(?:paid|settled)\b"
+                         r"|\bunpaid\b|\boverdue\b|\bstill (?:owes?|due|open)\b|\bowes? you\b|\boutstanding\b|\bnot (?:yet )?(?:been )?(?:paid|settled)\b"
+                         r"|\b(?:has|have|is|are)\s+yet\s+to\s+(?:pay|be\s+paid|settle)\b"
+                         rf"|\bowes?\s+(?:us\s+)?{AMOUNT}|{AMOUNT}\s+(?:is\s+|are\s+)?(?:still\s+)?(?:due|owed|owing|outstanding|unpaid|remaining|left)\b"
+                         rf"|\bbalance\s+(?:due\s+|remaining\s+)?(?:of|is)\s+{AMOUNT}"
+                         r"|未払い|未入金|未納|滞納|(?:支払|入金)(?:い|は|が)*まだ|まだ[^。！？]{0,12}(?:支払|入金|払)[^。！？]{0,8}(?:ません|ない)"
+                         r"|済み?では(?:ありません|ない)")
 SAYS_PAID = re.compile(r"(?i)\b(?:has|have|had|already|just|fully)\s+paid\b|\bpaid (?:in full|up|you|it|the|their|his|her|on|yesterday|today|last)\b"
                        r"|\bpaid\s*[¥$€£\d]|\bpayment (?:was |has been |is )?(?:received|in|complete|completed)\b|\bsettled\b"
-                       r"|\bmarked as paid\b|\b(?:is|are|was|were|has been) (?:now )?(?:fully )?paid\b")
-SENTENCE = re.compile(r'[^.!?\n]+[.!?]?')
+                       r"|\bmarked as paid\b|\b(?:is|are|was|were|has been) (?:now )?(?:fully )?paid\b"
+                       r"|支払い?済|入金済|完済|支払(?:われ|い)ました|お支払いいただきました|入金(?:が)?ありました|入金(?:を|が)確認(?:でき|され)?ました")
+SENTENCE = re.compile(r'[^.!?。！？\n]+[.!?。！？]?')
+CLAUSE = re.compile(r'\s[—–]\s|;\s|:\s|,\s(?=(?:but|while|whereas|though|although)\b)')
 MAX_ITEMS = 30
 REPEAT_DAYS = 7  # the same customer and the same total within a week is flagged as a possible repeat
+RECORD_WINDOW = timedelta(minutes=30)  # "I've recorded the payment" holds only for a payment Kioku recorded this recently
+NOTE_MAX = 300  # characters of a note to the customer: the approval card shows all of it, and only that goes to PayPal
+# A note or an item name with an email address, a web address or a phone number is refused: payment details reach a
+# customer only from PayPal's own invoice page — never from words copied out of a forwarded message.
+CONTACT = [rx for kind, rx, _ in PATTERNS if kind in ('EMAIL', 'PHONE')] + [
+    re.compile(r'(?i)\bhttps?://|\bwww\.|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|info|biz|io|co|jp|me|app|dev|link|example|test)\b')]
+NOTE_CONTACT = ('the note to the customer holds an email address, web address or phone number — Kioku never puts contact or '
+                'payment details in a note; the customer pays on PayPal\'s own invoice page')
 
 
 def norm(name: str) -> str:
@@ -39,6 +62,22 @@ def fmt(value, currency: str) -> str:
     text = f'{v:,.0f}' if currency in ('JPY',) or v == v.to_integral() else f'{v:,.2f}'
     sym = SYMBOL.get(currency)
     return f'{sym}{text}' if sym else f'{text} {currency}'
+
+
+def has_contact(text: str) -> bool:
+    return any(rx.search(text or '') for rx in CONTACT)
+
+
+def note_of(args: dict) -> str:
+    """The note to the customer exactly as it would reach PayPal: one line, at most NOTE_MAX characters."""
+    return ' '.join(str(args.get('note') or '').split())[:NOTE_MAX]
+
+
+def says(clause: str) -> str:
+    """'paid', 'unpaid' or '' — what one clause says about a customer's money ("owes you nothing" counts as paid)."""
+    if SAYS_CLEAR.search(clause):
+        return 'paid'
+    return 'unpaid' if SAYS_UNPAID.search(clause) else 'paid' if SAYS_PAID.search(clause) else ''
 
 
 @dataclass
@@ -136,6 +175,8 @@ def total_of(items: list, currency: str) -> tuple[Decimal | None, list[dict], st
     for i in items:
         if not isinstance(i, dict) or not str(i.get('name', '')).strip():
             return None, [], 'every item needs a name'
+        if has_contact(str(i['name'])):
+            return None, [], 'an item name cannot hold an email address, web address or phone number'
         try:
             qty = Decimal(str(i.get('quantity', 1)).replace(',', ''))
             price = Decimal(str(i.get('unit_price', '')).replace(',', '').replace('¥', '').replace('$', ''))
@@ -186,7 +227,12 @@ class Money:
                 return 'block', 'invoice.bad_items', problem
             if total > self.max_invoice:
                 return 'block', 'invoice.limit', f'{fmt(total, self.currency)} is over the limit of {fmt(self.max_invoice, self.currency)} per invoice'
+            note = note_of(args)
+            if has_contact(note):
+                return 'block', 'invoice.note_contact', NOTE_CONTACT
             reason = f'bill {cust.name} {fmt(total, self.currency)} through PayPal ({describe_items(items, self.currency)})'
+            if note:  # the card shows the note word for word: text from a forwarded message never rides along unseen
+                reason += f' — note to the customer: “{note}”'
             others = {e.lower() for e in re.findall(r'[\w.%+-]+@[\w-]+(?:\.[\w-]+)+', context or '')} - {cust.email.lower()}
             if others:
                 reason += f' — to the address in your customer book; the message names {len(others)} other address' + ('es' if len(others) > 1 else '') + ', not used'
@@ -213,7 +259,11 @@ class Money:
                 return 'block', 'invoice.closed', f'PayPal shows #{row["number"]} as {row["status"].lower()}'
             due = Decimal(row['due_amount'])
             if name == 'send_reminder':
-                return 'ask', 'invoice.ask_owner', f'remind {row["customer"]} about #{row["number"]} ({fmt(due, row["currency"])} due) through PayPal'
+                note = note_of(args)
+                if has_contact(note):
+                    return 'block', 'invoice.note_contact', NOTE_CONTACT
+                return 'ask', 'invoice.ask_owner', (f'remind {row["customer"]} about #{row["number"]} ({fmt(due, row["currency"])} due) '
+                                                    'through PayPal' + (f' — note to the customer: “{note}”' if note else ''))
             try:
                 value = Decimal(str(args.get('amount') or due).replace(',', '').replace('¥', ''))
             except InvalidOperation:
@@ -235,7 +285,7 @@ class Money:
                 raise ValueError(problem or 'the customer is no longer in the customer book')
             due = (now + timedelta(days=int(args.get('due_days') or 14))).date()
             iid = self.paypal.create_invoice(business_name=cust.name, email=cust.email, items=items, currency=self.currency,
-                                             due=due, note=str(args.get('note') or '')[:500], reference=f'Kioku {approval_id}',
+                                             due=due, note=note_of(args), reference=f'Kioku {approval_id}',
                                              invoice_date=now.date())
             payer = self.paypal.send_invoice(iid, notify=self.notify)
             s = summary(self.paypal.get_invoice(iid))
@@ -251,7 +301,7 @@ class Money:
         if not row:
             raise ValueError('that invoice is no longer in the ledger')
         if name == 'send_reminder':
-            self.paypal.remind(row['id'], str(args.get('note') or '')[:500])
+            self.paypal.remind(row['id'], note_of(args))
             self.ledger.update(row['id'], reminded=now.isoformat(timespec='seconds'))
             text = f'Reminder sent to {row["customer"]} about invoice #{row["number"]} through PayPal.'
             return text, [text]
@@ -262,6 +312,9 @@ class Money:
             self.paypal.record_payment(row['id'], value, row['currency'], method=method, paid_on=now.date(),
                                        note=f'Recorded by Kioku {approval_id}')
             row = self.refresh_one(row)
+            # what Kioku itself recorded, and when: the only thing that makes a reply's "Recorded ¥12,320 …" true
+            row = self.ledger.update(row['id'], recorded=row.get('recorded', []) + [
+                {'at': now.isoformat(timespec='seconds'), 'amount': plain(value), 'approval': approval_id}])
             text = (f'{fmt(value, row["currency"])} from {row["customer"]} recorded on invoice #{row["number"]} in PayPal '
                     f'— PayPal now shows it as {row["status"].replace("_", " ").lower()}.')
             return text, [text]
@@ -302,49 +355,80 @@ class Money:
         customers = [c for c in self.customers.all() if len(norm(c.name)) >= 3]
         rows = self.ledger.all()
         out, fresh = [], {}
-        # clause by clause: "Yes, Hotel Sakura paid last week — #0006 still has ¥36,600 due" says both, and each is checked
-        clauses = [c.strip() for m in SENTENCE.findall(text or '') if not m.strip().endswith('?')
-                   for c in re.split(r'\s[—–]\s|;\s|:\s|,\s(?=but\b)', m)]
-        for sentence in clauses:
-            if not sentence:
+        for sentence in SENTENCE.findall(text or ''):
+            if sentence.strip().endswith(('?', '？')):
                 continue
-            says = 'unpaid' if SAYS_UNPAID.search(sentence) else 'paid' if SAYS_PAID.search(sentence) else ''
-            if not says:
-                continue
-            numbers = {n.lstrip('0') for n in re.findall(r'#\s?(\d+)', sentence)}
-            named_in = {r['customer'] for r in rows if r.get('number', '').lstrip('0') in numbers}  # "#0003 is still unpaid"
-            for c in customers:
-                if norm(c.name) not in norm(sentence) and c.name not in named_in:
+            # clause by clause: "Yes, Hotel Sakura paid last week — #0006 still has ¥36,600 due" says both, and each is
+            # checked; a clause that only names someone ("- Hotel Sakura: ¥36,600 still due") says who the next one is about
+            label = (set(), [])
+            for clause in (c.strip() for c in CLAUSE.split(sentence)):
+                numbers = {n.lstrip('0') for n in re.findall(r'#\s?(\d+)', clause)} - {''}
+                named_in = {r['customer'] for r in rows if r.get('number', '').lstrip('0') in numbers}  # "#0003 is still unpaid"
+                who = [c for c in customers if norm(c.name) in norm(clause) or c.name in named_in]
+                said = says(clause)
+                if not said:
+                    rest = re.sub(r'#\s?\d+', ' ', clause)
+                    for c in who:
+                        rest = re.sub(re.escape(c.name), ' ', rest, flags=re.I)
+                    if who and len(re.findall(r'[^\W\d_]+', rest)) <= 2:  # just a name: "- **Hotel Sakura** (#0006)"
+                        label = (numbers, who)
                     continue
-                theirs = [r for r in rows if r['customer'] == c.name]
-                if not theirs:
-                    continue
-                named = [r for r in theirs if r.get('number', '').lstrip('0') in numbers]
-                row = (named or theirs)[-1]
-                if row['id'] not in fresh:
-                    fresh[row['id']] = self.refresh_one(row)
-                row = fresh[row['id']]
-                out.append({'customer': c.name, 'says': says, 'row': row, 'ok': (row['status'] in PAID) == (says == 'paid')})
+                if not who:
+                    numbers, who = label
+                for c in who:
+                    theirs = [r for r in rows if r['customer'] == c.name]
+                    if not theirs:
+                        continue
+                    named = [r for r in theirs if r.get('number', '').lstrip('0') in numbers]
+                    row = (named or theirs)[-1]
+                    if row['id'] not in fresh:
+                        fresh[row['id']] = self.refresh_one(row)
+                    row = fresh[row['id']]
+                    out.append({'customer': c.name, 'says': said, 'row': row, 'ok': (row['status'] in PAID) == (said == 'paid')})
         return out
 
-    def claim_holds(self, tool: str, text: str) -> bool:
-        """The reply says an invoice or a reminder went out, or a payment was recorded. True when the records show it
-        within the last day for the customer named (payments are read from PayPal) — then it is about an action the
-        owner approved earlier, not something the model pretends to have done now."""
-        since = self.clock() - timedelta(hours=24)
-        names = [c.name for c in self.customers.all() if len(norm(c.name)) >= 3 and norm(c.name) in norm(text)]
+    def claim_holds(self, tool: str, said: str, reply: str = '') -> bool:
+        """The reply says an invoice or a reminder went out, or a payment was recorded (said: the sentences that say so;
+        reply: the whole reply, for the customer's name when those sentences leave it out). True only when Kioku's own
+        records show it for that customer — an invoice or a reminder the owner approved within the last day, or a payment
+        Kioku recorded after the owner's approval within the last half hour, for the amount and invoice the claim names.
+        An invoice PayPal shows as paid from before (paid in cash last week, say) never makes a new "Recorded ¥12,320"
+        true: the claim must be about something actually done just now."""
+        now = self.clock()
+        customers = [c.name for c in self.customers.all() if len(norm(c.name)) >= 3]
+        names = [n for n in customers if norm(n) in norm(said)] or [n for n in customers if norm(n) in norm(reply)]
         rows = [r for r in self.ledger.all() if not names or r['customer'] in names]
-        recent = lambda ts: bool(ts) and datetime.fromisoformat(ts) >= since  # noqa: E731
+        recent = lambda ts, window=timedelta(hours=24): bool(ts) and datetime.fromisoformat(ts) >= now - window  # noqa: E731
         if tool == 'create_invoice':
             return any(r.get('approval') not in ('', 'demo') and recent(r.get('created')) for r in rows)
         if tool == 'send_reminder':
             return any(recent(r.get('reminded')) for r in rows)
         if tool == 'record_payment':
-            for r in rows[-5:]:
-                if r.get('status') not in PAID:
-                    r.update(self.refresh_one(r))
-            return any(r.get('status') == 'MARKED_AS_PAID' for r in rows)
+            numbers = {n.lstrip('0') for n in re.findall(r'#\s?(\d+)', said)} - {''}
+            amounts = {Decimal(a.replace(',', '')) for a in re.findall(r'[¥$€£]\s?(\d[\d,]*(?:\.\d+)?)', said)}
+            return any(recent(p['at'], RECORD_WINDOW) and (not numbers or r.get('number', '').lstrip('0') in numbers)
+                       and (not amounts or Decimal(p['amount']) in amounts) for r in rows for p in r.get('recorded', []))
         return False
+
+    def named_in(self, text: str) -> set[str]:
+        """The customers a message names: by name or a distinctive word of it ("Sakura"), or by one of their invoice
+        numbers ("#0011")."""
+        numbers = {n.lstrip('0') for n in re.findall(r'#\s?(\d+)', text or '')} - {''}
+        names = {r['customer'] for r in self.ledger.all() if r.get('number', '').lstrip('0') in numbers}
+        for c in self.customers.all():
+            words = re.findall(r'\w{4,}', c.name.lower())
+            if (len(norm(c.name)) >= 3 and norm(c.name) in norm(text)) \
+                    or any(re.search(rf'(?i)\b{re.escape(w)}\b', text or '') for w in words):
+                names.add(c.name)
+        return names
+
+    def about(self, name: str, args: dict) -> str:
+        """The customer an invoice tool call is for, from the customer book or the ledger ('' when none matches)."""
+        if name == 'create_invoice':
+            cust, _ = self.customers.find(str(args.get('customer', '')))
+            return cust.name if cust else ''
+        row, _ = self.ledger.find(str(args.get('invoice', '') or args.get('customer', '')))
+        return row['customer'] if row else ''
 
     def correction(self, v: dict) -> str:
         r, at = v['row'], self.clock().strftime('%H:%M')

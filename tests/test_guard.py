@@ -137,6 +137,8 @@ def test_receipts_use_the_kioku_clock(make_kioku):
     ("I can't approve it. I'll note that task A-001 is marked done.", set(), ['complete_task']),
     ("I've marked the oven check as done.", {'complete_task'}, []),
     ("I can't mark approvals as done — only you can decide them.", set(), []),
+    ("I've recorded ¥9,000 from Ikoi Nursery.", set(), ['record_payment']),       # a payment, not a note in memory
+    ("I've recorded ¥6,800 for the flour in your notes.", set(), ['save_memory']),
 ])
 def test_unbacked_claims(text, done, expected):
     from kioku.guard import unbacked_claims

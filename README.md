@@ -36,13 +36,15 @@ When PayPal shows a new payment, it goes into the owner's memory and the follow-
 | `invoice.ask_owner` | billing, reminding and recording a payment wait in the approval queue; the card says exactly what will run in PayPal, and afterwards what PayPal did |
 | `invoice.unknown_customer` | only customers in the owner's **customer book** can be billed. Only the owner adds customers, from the page — the model has no tool for it, so a message can never add a payee |
 | (no email for the model) | customers' email addresses never reach the model; it knows customers by name. An address in a message ("our accounts moved — invoice billing@…") never changes where an invoice goes, and the approval says so |
+| `invoice.note_contact` | a note to the customer (on an invoice or a reminder) is shown word for word on the approval card, and exactly that goes to PayPal; a note or item name holding an email address, web address or phone number is refused — so a forwarded message's address can't ride along on a real invoice |
+| `action.not_asked` | when Kioku asks the model again to use the tool (`action.guard_decides`), only the action the owner's message asked for — for a customer it names — can start; the tools offered narrow to it, and anything else is refused |
 | `invoice.bad_items` / `invoice.limit` | totals are worked out exactly in code (yen are whole numbers); invoices over the owner's limit are refused |
 | `invoice.possible_repeat` | the same total to the same customer within a week is flagged on the approval card |
 | `invoice.already_paid` | no reminder and no recorded payment for an invoice PayPal shows as paid — checked live before anything is queued |
-| `honesty.paypal_corrected` | the reply says a customer has (or has not) paid → checked against PayPal, clause by clause; when it is wrong, PayPal's status is added in front of the owner |
+| `honesty.paypal_corrected` | the reply says a customer has (or has not) paid ("still has ¥36,600 due", "owes you nothing", a list line "Hotel Sakura: ¥36,600 still due") → checked against PayPal, clause by clause; when it is wrong, PayPal's status is added in front of the owner |
 | `honesty.paypal_checked` | …and when it is right, the reply carries a "checked with PayPal" receipt |
 | `money.check_first` | a question about payments answered without reading PayPal → Kioku reads PayPal and asks again |
-| `honesty.note_added` (invoices) | "I've sent the invoice", "Recorded ¥9,000 …" with nothing done → checked against the records; when the records do not show it, the owner is told plainly |
+| `honesty.note_added` (invoices) | "I've sent the invoice", "Recorded ¥9,000 …" with nothing done → checked against the records; when the records do not show it, the owner is told plainly. A recorded payment counts only if Kioku recorded it after the owner's approval in the last half hour, for that amount and invoice — never an older paid invoice, never in the turn that only queued it |
 
 An example from the real model (Nemotron 3.5 Lightning) during testing — the model slipped, the guard caught it:
 
@@ -58,7 +60,10 @@ cash; "who still owes me?"; a refused reminder on a paid invoice; a forwarded "o
 requests (leading questions, unknown customers, amounts over the limit, "mark it paid", "ignore your rules"). The slips
 the model made in those runs — answering "who owes me" without reading PayPal, "yes, they paid … still due", saying a
 payment was recorded after the guard had refused it — are caught by the rules above, and each is a case in
-`tests/test_money.py` (scripted model, no network). A full run of the ten costs about $0.008.
+`tests/test_money.py` (scripted model, no network). A full run of the ten costs about $0.008. Recording the demo video
+showed three more, now fixed the same way: asked again after "Send Café Hana a reminder", the model billed Hotel Sakura
+instead, with the forwarded email in the note (`action.not_asked`, `invoice.note_contact`); "Recorded ¥12,320 … waiting
+for your approval" passed because an older Café Hana invoice had been paid; and "still has ¥36,600 due" went unchecked.
 
 ---
 
@@ -107,7 +112,7 @@ an index, and every answer points at a note the owner can open.
 | `honesty.note_added` | the reply says "sent" or "paid" (never true inside a turn) → the owner is told plainly that it did not happen |
 | `honesty.note_added` (queue, task) | the reply says something is "queued for your approval" or "marked done" when nothing was → the owner is told plainly |
 | `recall.search_first` | the answer to a question gives up ("I don't know") without having searched → Kioku searches the notes and asks again |
-| `action.guard_decides` | a request to pay or send is answered without the tool ("decide in your panel") → Kioku asks again, so the guard decides |
+| `action.guard_decides` | a request to pay or send is answered without the tool ("decide in your panel") → Kioku asks again, so the guard decides — for that action only (`action.not_asked`) |
 
 The model cannot read or change these rules, and no text in the chat can approve anything. Every decision is appended
 to `audit.jsonl` as a receipt (`R-00042`) holding counts and kinds — never the personal data itself.

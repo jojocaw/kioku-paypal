@@ -623,7 +623,7 @@ await card(`<h2>How it’s built</h2><div class="lines">
   <p><span class="pp">PayPal Invoicing v2</span> (sandbox)</p>
   <p>NVIDIA Nemotron 3.5 Lightning on Nebius Token Factory</p>
   <p>AG Grid · Render</p></div>
-  <p class="small">Standard-library Python · 154 tests · MIT</p>`, buildMs);
+  <p class="small">Standard-library Python · 191 tests · MIT</p>`, buildMs);
 scene('closing');
 await card(`<div class="mark">記</div><h1>Kioku × PayPal</h1><p>Let the agent do the chasing — PayPal keeps the record.</p>
   <p class="small">${[DEMO, REPO].filter(Boolean).join(' · ')}</p>`, closeMs, { keep: true });

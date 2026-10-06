@@ -228,6 +228,10 @@ TOOL_RULES = {
     'record_payment': ('ask', 'changes the books in PayPal — the owner decides'),
 }
 INVOICE_TOOLS = {'create_invoice', 'check_invoices', 'send_reminder', 'record_payment'}
+# The tools that send, pay, bill or record (each waits for the owner). When Kioku asks the model again to use the tool for
+# the owner's request, only the one that request asked for may start (action.not_asked).
+ACTIONS = {'send_message': 'a message', 'make_payment': 'a payment', 'create_invoice': 'an invoice',
+           'send_reminder': 'a reminder', 'record_payment': 'a recorded payment'}
 MAX_PAYMENT = 200  # default hard limit; Settings.max_payment overrides it
 # Classic payment scams: paying in gift cards, prepaid cards or crypto to someone who asked for it.
 SCAM = re.compile(r'(?i)gift\s*cards?|prepaid\s*cards?|itunes|google\s*play\s*cards?|steam\s*cards?|bitcoin|crypto|USDT|ギフトカード|プリペイド|電子マネー')
@@ -296,7 +300,7 @@ CLAIMS = [
                                   r"(?:\w+ )?invoice\b|\bi(?:'ve| have) (?:just |now |already )?billed\b")),
     ('send_reminder', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?sent (?:a |the |them a |her a |him a )?(?:friendly |payment )?reminder\b")),
     ('record_payment', re.compile(r"(?i)\bi(?:'ve| have) (?:just |now |already )?(?:recorded|logged|entered|marked)\b[^.!?\n]{0,40}?"
-                                  r"\b(?:payments?|cash|transfers?|deposits?|as paid)\b"
+                                  r"(?:\b(?:payments?|cash|transfers?|deposits?|as paid)\b|[¥$€£]\s?\d[\d,]*\s+from\b)"  # "… ¥9,000 from Ikoi Nursery"
                                   r"|\b(?:payment|cash|transfer)\b[^.!?\n]{0,80}\b(?:has been|have been|is now) (?:recorded|logged|entered)\b"
                                   # "Recorded ¥9,000 from Ikoi Nursery …" (money words in the sentence: "Recorded best day: 412" is not one)
                                   r"|(?:^|[.!?:—–]\s*)(?:recorded|logged)\b(?=[^.!?\n]*(?:[¥$€£]\s?\d|\bpayment|\bpaid\b|\btransfer|\bcash\b|\binvoice))")),
@@ -439,8 +443,13 @@ class Guard:
 
     money = None  # kioku.money.Money when PayPal is connected (set by Kioku)
 
-    def check_tool(self, call: ToolCall, redacted_args: dict, context: str = '') -> Decision:
-        if call.name in INVOICE_TOOLS and '_unparsed' not in call.arguments:
+    def check_tool(self, call: ToolCall, redacted_args: dict, context: str = '', only: set | None = None) -> Decision:
+        """only: set after Kioku asked the model again to use the tool for the owner's request — the actions that request
+        asks for. Then nothing else that sends, pays, bills or records can start (action.not_asked)."""
+        off = self.not_asked(call, only, context) if only is not None and call.name in ACTIONS else ''
+        if off:
+            action, rule, reason = 'block', 'action.not_asked', off
+        elif call.name in INVOICE_TOOLS and '_unparsed' not in call.arguments:
             # decided on the owner's side with the real names: the customer book, the limits, PayPal's own status
             if self.money is None:
                 action, rule, reason = 'block', 'paypal.off', 'PayPal is not connected'
@@ -452,5 +461,20 @@ class Guard:
         else:
             action, rule, reason = check_tool_rules(ToolCall(call.id, call.name, redacted_args), self.settings.max_payment,
                                                     context)
-        receipt = self.audit.log('tool_call', action, rule, reason, tool=call.name)
+        # money reasons use the real names (and quote a note to the customer); the receipt keeps no personal data
+        logged = self.redactor.redact(reason, Vault())[0] if call.name in INVOICE_TOOLS else reason
+        receipt = self.audit.log('tool_call', action, rule, logged, tool=call.name)
         return Decision(action, rule, reason, receipt)
+
+    def not_asked(self, call: ToolCall, only: set, context: str) -> str:
+        """Why a call is not what the owner's message (context) asked for, or '' when it is: another kind of action, or
+        an invoice action for a customer the message does not name — a model asked again after "Send Café Hana a
+        reminder" once billed Hotel Sakura instead."""
+        if call.name not in only:
+            asked = ' or '.join(ACTIONS[t] for t in sorted(only) if t in ACTIONS) or 'nothing that sends, pays, bills or records'
+            return f'the owner asked for {asked}, not {ACTIONS[call.name]} — when Kioku asks again, nothing else can start'
+        if call.name in INVOICE_TOOLS and self.money is not None and '_unparsed' not in call.arguments:
+            named, whom = self.money.named_in(context), self.money.about(call.name, call.arguments)
+            if named and whom and whom not in named:
+                return f"the owner's message is about {' and '.join(sorted(named))}, not {whom}"
+        return ''
