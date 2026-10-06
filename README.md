@@ -41,7 +41,7 @@ When PayPal shows a new payment, it goes into the owner's memory and the follow-
 | `invoice.bad_items` / `invoice.limit` | totals are worked out exactly in code (yen are whole numbers); invoices over the owner's limit are refused |
 | `invoice.possible_repeat` | the same total to the same customer within a week is flagged on the approval card |
 | `invoice.already_paid` | no reminder and no recorded payment for an invoice PayPal shows as paid — checked live before anything is queued |
-| `honesty.paypal_corrected` | the reply says a customer has (or has not) paid ("still has ¥36,600 due", "owes you nothing", a list line "Hotel Sakura: ¥36,600 still due") → checked against PayPal, clause by clause; when it is wrong, PayPal's status is added in front of the owner |
+| `honesty.paypal_corrected` | the reply says a customer has (or has not) paid ("shows as paid", "It's marked as settled", "still has ¥36,600 due", "owes you nothing", a list line "Hotel Sakura: ¥36,600 still due", the lines under "Still outstanding:") → checked against PayPal, clause by clause; when it is wrong, PayPal's status is added in front of the owner |
 | `honesty.paypal_checked` | …and when it is right, the reply carries a "checked with PayPal" receipt |
 | `money.check_first` | a question about payments answered without reading PayPal → Kioku reads PayPal and asks again |
 | `honesty.note_added` (invoices) | "I've sent the invoice", "Recorded ¥9,000 …" with nothing done → checked against the records; when the records do not show it, the owner is told plainly. A recorded payment counts only if Kioku recorded it after the owner's approval in the last half hour, for that amount and invoice — never an older paid invoice, never in the turn that only queued it |
@@ -64,6 +64,10 @@ payment was recorded after the guard had refused it — are caught by the rules 
 showed three more, now fixed the same way: asked again after "Send Café Hana a reminder", the model billed Hotel Sakura
 instead, with the forwarded email in the note (`action.not_asked`, `invoice.note_contact`); "Recorded ¥12,320 … waiting
 for your approval" passed because an older Café Hana invoice had been paid; and "still has ¥36,600 due" went unchecked.
+The retake found one more: "Hotel Sakura's invoice … shows as paid. It's marked as settled with nothing remaining due"
+went unread (and the recorder's caption called it right). The guard now reads any status word in a clause that names a
+customer or points back to one ("It", "They", "そこ"), and the lines of a list under a status heading; the video's
+captions say right only when the guard checked the reply against PayPal and everything matched.
 
 ---
 

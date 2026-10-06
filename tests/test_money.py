@@ -531,3 +531,113 @@ def test_no_outstanding_balance_and_still_has_due_are_checked_with_paypal(shop):
     fake.responses += ['Café Hana still has ¥19,040 due.'] * 2  # was not checked at all
     reply = k.chat('Did Café Hana pay?')
     assert "PayPal shows Café Hana's invoice #0001 as paid" in reply.text
+
+
+# ---------------------------------------------------------------- slips seen in the PayPal video retake (2026-10-06 18:48)
+TAKE4_SAKURA = ("You're right — Hotel Sakura's invoice #0006 for ¥36,600 was sent and shows as paid. "
+                "It's marked as settled with nothing remaining due.")
+TAKE4_OWES = ("Here’s what’s still outstanding on your PayPal invoices:\n\n- **Hotel Sakura** — ¥36,600 (invoice #0006, 5 days overdue)\n"
+              "- **Ikoi Nursery** — ¥9,000 (invoice #0008, due 2026-10-15)\n- **Café Hana** — ¥12,320 (invoice #0012, due 2026-10-19)\n\n"
+              "Total still due: ¥57,920.")
+MELON = [{'name': 'Melon pan', 'quantity': 50, 'unit_price': 180}]
+LOAVES = [{'name': 'Baguette', 'quantity': 30, 'unit_price': 320}, {'name': 'Country loaf', 'quantity': 4, 'unit_price': 680}]
+
+
+def bill(k, fake, pp, customer, items, number):
+    """Bill a customer and approve it, so that PayPal gives the invoice the number it had in the demo (#0006 …)."""
+    pp.n = number - 1
+    fake.responses += [('', [('create_invoice', {'customer': customer, 'items': items})]), 'Waiting for your approval.']
+    k.chat(f'Bill {customer}.')
+    k.decide(k.approvals.list()[-1]['id'], True)
+    return f'INV2-TEST-{number:04d}'
+
+
+def test_take_4_shows_as_paid_and_it_is_marked_as_settled_are_corrected(shop):
+    # The real reply went through unread: "shows as paid" was not a claim, and "It's marked as settled …" was about nobody.
+    k, fake, pp = shop()
+    bill(k, fake, pp, 'Hotel Sakura', SAKURA, 6)  # #0006 ¥36,600, unpaid
+    fake.responses += [('', [('check_invoices', {'customer': 'Hotel Sakura', 'which': 'all'})]),
+                       ('', [('check_invoices', {'which': 'open'})]), TAKE4_SAKURA]  # PayPal read twice, as in the take
+    reply = k.chat("Hotel Sakura paid last week, right? I'm pretty sure they did.")
+    assert reply.text == TAKE4_SAKURA + "\n\nKioku Guard: PayPal shows Hotel Sakura's invoice #0006 as unpaid — ¥36,600 still due (checked 09:30)."
+    assert [e.rule for e in reply.events if e.tool == 'paypal_check'] == ['honesty.paypal_corrected']
+    assert [(v['says'], v['row']['number']) for v in k.money.verify(TAKE4_SAKURA)] == [('paid', '0006'), ('paid', '0006')]
+
+
+def test_take_4_lines_under_still_outstanding_are_each_checked(shop):
+    # "- **Ikoi Nursery** — ¥9,000 (invoice #0008, due 2026-10-15)" says no status itself: it was not read at all.
+    k, fake, pp = shop()
+    k.money.customers.add('Ikoi Nursery', 'office@ikoi-nursery.example.com')
+    bill(k, fake, pp, 'Hotel Sakura', SAKURA, 6)
+    bill(k, fake, pp, 'Ikoi Nursery', MELON, 8)
+    hana = bill(k, fake, pp, 'Café Hana', LOAVES, 12)
+    fake.responses += [TAKE4_OWES] * 2  # first without reading PayPal: Kioku reads it and asks again, as in the take
+    reply = k.chat('Who still owes me money?')
+    assert [e.detail for e in reply.events if e.rule == 'honesty.paypal_checked'] == [
+        'checked with PayPal: #0006 unpaid', 'checked with PayPal: #0008 unpaid', 'checked with PayPal: #0012 unpaid']
+    assert 'Kioku Guard' not in reply.text
+    pp.customer_pays(hana)  # the same list once Café Hana has paid #0012 on PayPal's page: that line is corrected
+    fake.responses += [TAKE4_OWES] * 2
+    reply = k.chat('Who still owes me money?')
+    assert reply.text.endswith("\n\nKioku Guard: PayPal shows Café Hana's invoice #0012 as paid (checked 09:30).")
+
+
+@pytest.mark.parametrize('text,said', [
+    # a customer (or a word pointing back to one) and a status word in the same clause
+    ("Hotel Sakura's invoice #0001 shows as paid.", ['paid']),
+    ("PayPal lists Hotel Sakura's invoice #0001 as paid.", ['paid']),
+    ("Hotel Sakura's invoice #0001 is marked as settled.", ['paid']),
+    ('Hotel Sakura paid by bank transfer this morning.', ['paid']),
+    ('Hotel Sakura has cleared the balance.', ['paid']),
+    ("Hotel Sakura's payment has been received in full.", ['paid']),
+    ('Hotel Sakura has no balance.', ['paid']),
+    ("Hotel Sakura's balance is ¥0.", ['paid']),
+    ("Hotel Sakura's invoice #0001 is closed.", ['closed']),
+    ('Hotel Sakuraの請求書は精算済みです。', ['paid']),
+    ("Hotel Sakura's invoice #0001 for ¥36,600 went out on 16 September. It shows as paid.", ['paid']),
+    ('Hotel Sakura called this morning. They paid in cash.', ['paid']),
+    ('Hotel Sakuraの請求書#0001を確認しました。そこはまだ未払いです。', ['unpaid']),
+    ("Hotel Sakura isn't marked as paid in PayPal.", ['unpaid']),
+    ("Hotel Sakura's invoice #0001 is past due.", ['unpaid']),
+    ("Hotel Sakura's payment is still pending.", ['unpaid']),
+    ("Hotel Sakura's invoice #0001 went out on 16 September. This one is still to be paid.", ['unpaid']),
+    ("Hotel Sakura hasn't paid yet, so if you like, I can send a reminder.", ['unpaid']),  # the offer is the condition
+    # a heading's status reaches the list lines under it; a status and a colon reach the rest of the sentence
+    ('Paid:\n- Hotel Sakura — ¥36,600 (#0001)', ['paid']),
+    ('未払い：\n・Hotel Sakura ¥36,600（#0001）', ['unpaid']),
+    ('Not due yet:\n\n- Hotel Sakura — ¥36,600 (invoice #0001, due 2026-10-19)', ['unpaid']),
+    ('Still due: Hotel Sakura ¥36,600 (#0001).', ['unpaid']),
+    ('Still outstanding:\n- Hotel Sakura — ¥36,600 (#0001)\nThat is all. Hotel Sakura — ¥36,600.', ['unpaid']),
+    ('Still open:\n- Hotel Sakura — ¥36,600 (#0001)', ['unpaid']),
+    # not claims: another sense of the word, a pronoun that points to something else, a habit, a condition, a label
+    ('Hotel Sakura is closed on Mondays.', []),
+    ("Hotel Sakura's breakfast room is open until 10.", []),
+    ('Hotel Sakura ordered 120 croissants. They received them at 7.', []),
+    ('Hotel Sakura called. The oven is fixed. It is paid for.', []),
+    ("If Hotel Sakura hasn't paid by Friday, I'll remind them.", []),
+    ('Once Hotel Sakura has paid, the task is ticked.', []),
+    ('Hotel Sakura usually paid by bank transfer.', []),
+    ('Hotel Sakura wants a paid listing in the newsletter.', []),
+    ("Hotel Sakura's paid listing runs in November.", []),
+    ('Outstanding tasks: send Hotel Sakura the October invoice.', []),
+    ('Still open from the last journal:\n- Ask Hotel Sakura about the Christmas order', []),
+    ("Still open: the quote for Hotel Sakura's Christmas order (¥20,800).", []),  # the briefing's open tasks
+])
+def test_a_status_is_read_wherever_the_customer_is_named_or_pointed_to(shop, text, said):
+    k, fake, pp = shop(('', [('create_invoice', {'customer': 'Hotel Sakura', 'items': SAKURA})]), 'Waiting for your approval.')
+    k.chat('Bill Hotel Sakura for September.')
+    k.decide('A-001', True)  # #0001 ¥36,600, unpaid
+    assert [v['says'] for v in k.money.verify(text)] == said
+
+
+def test_closed_is_paid_or_cancelled_and_a_cancelled_invoice_is_not_still_due(shop):
+    k, fake, pp = shop(('', [('create_invoice', {'customer': 'Hotel Sakura', 'items': SAKURA})]), 'Waiting for your approval.')
+    k.chat('Bill Hotel Sakura for September.')
+    k.decide('A-001', True)
+    [v] = k.money.verify("Hotel Sakura's invoice #0001 is closed.")
+    assert not v['ok'] and k.money.correction(v) == "PayPal shows Hotel Sakura's invoice #0001 as unpaid — ¥36,600 still due (checked 09:30)"
+    pp.invoices['INV2-TEST-0001']['status'] = 'CANCELLED'  # cancelled in PayPal by the owner
+    [v] = k.money.verify("Hotel Sakura's invoice #0001 is closed.")
+    assert v['says'] == 'closed' and v['ok']
+    [v] = k.money.verify('Hotel Sakura still owes ¥36,600.')
+    assert not v['ok'] and k.money.correction(v) == "PayPal shows Hotel Sakura's invoice #0001 as cancelled (checked 09:30)"

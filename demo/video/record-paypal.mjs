@@ -10,7 +10,9 @@
 // make_mp4.py) last week's review is redone on that copy, so its Money section can be shown. PayPal's payment page for the
 // new invoice is a screenshot from an unrecorded tab, with everything but the invoice itself hidden (the sandbox seller).
 // A reply that takes over 75 s stops the take. What happened (replies, guard events, PayPal results, cost) goes to
-// out/kioku-paypal.json.
+// out/kioku-paypal.json. Captions that depend on the take come from captions.mjs: a reply is called right only when the
+// guard checked it against PayPal and everything matched; a slip is called a slip, with whether the guard caught it (a slip
+// the guard missed is logged under "slips" — that take is not for the video).
 // KIOKU_VIDEO_URL=http://127.0.0.1:PORT records against a server that is already running (a rehearsal) instead.
 // KIOKU_VIDEO_DEMO=<address> adds the hosted demo's address to the closing card.
 // Needs Playwright (`npm i playwright`, or PLAYWRIGHT_MODULE pointing at an installed copy's index.mjs).
@@ -19,6 +21,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync }
 import net from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { owesCaption, refusalCaption, sakuraCaption, shotLabel } from './captions.mjs';
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -50,7 +53,7 @@ if (!BASE) {
   server = spawn(PYTHON, ['-m', 'kioku.web', '--demo', 'demo/seed', '--port', String(port)], { cwd: ROOT, stdio: 'ignore' });
 }
 // stop the demo server however this script ends, so nothing is left running; keep the log of what happened
-const LOG = { started: new Date().toISOString(), server: BASE, scenes: [], turns: [], approvals: [], shown: {}, skipped: [] };
+const LOG = { started: new Date().toISOString(), server: BASE, scenes: [], turns: [], approvals: [], shown: {}, skipped: [], slips: [] };
 const saveLog = () => { try { writeFileSync(`${OUT}/${NAME}.json`, JSON.stringify(LOG, null, 1)); } catch { /* best effort */ } };
 const stop = () => { try { server?.kill(); } catch { /* already gone */ } };
 process.on('exit', stop);
@@ -319,7 +322,7 @@ async function paypalPage(url, expected) {
     await ctx.close().catch(() => {});
   }
 }
-async function showShot(b64, url) {
+async function showShot(b64) {  // the bar says what the page is, never its address (anyone could open it)
   await page.evaluate(([src, u]) => {
     const o = document.createElement('div');
     o.id = 'rec-shot';
@@ -329,7 +332,7 @@ async function showShot(b64, url) {
     o.querySelector('img').src = src;
     document.body.append(o);
     requestAnimationFrame(() => { o.style.opacity = '1'; });
-  }, [`data:image/png;base64,${b64}`, url.replace(/^https?:\/\//, '')]);
+  }, [`data:image/png;base64,${b64}`, shotLabel()]);
 }
 const hideShot = async () => {
   await page.evaluate(() => { const o = document.getElementById('rec-shot'); if (o) o.style.opacity = '0'; });
@@ -356,7 +359,8 @@ const start = await api('/api/invoices');
 LOG.start = start.rows.map(r => `#${r.number} ${r.customer} ${r.status} due ${r.due_date}${r.late ? ` (${r.late} days late)` : ''}`);
 log('invoices at the start:', LOG.start.join(' | '));
 const shared = start.rows.filter(r => r.shared);
-if (!(shared.some(r => r.customer === 'Hotel Sakura' && !r.paid && r.late > 0)
+const sakuraInvoice = shared.find(r => r.customer === 'Hotel Sakura' && !r.paid && r.late > 0);
+if (!(sakuraInvoice
   && shared.some(r => r.customer === 'Café Hana' && r.paid) && shared.some(r => r.customer === 'Ikoi Nursery' && !r.paid && !r.late))) {
   throw new Error('the shared demo invoices are not as the video expects (overdue / paid / not due yet) — see demo/paypal/seed_invoices.py');
 }
@@ -373,27 +377,22 @@ await card(`<div class="mark">記</div><h1>Kioku × PayPal</h1>
 scene('Hotel Sakura');
 await caption('Agents are good at sounding sure. With money, that’s a problem.');
 const sakura = await ask("Hotel Sakura paid last week, right? I'm pretty sure they did.");
-const fixed = sakura.events.find(e => e.rule === 'honesty.paypal_corrected');
-const right = sakura.events.find(e => e.rule === 'honesty.paypal_checked');
-const readPP = sakura.events.find(e => e.tool === 'check_invoices' || e.rule === 'money.check_first');
-if (fixed) {
+// right or wrong is what the guard found when it checked the reply against PayPal, never how the reply sounds
+const said = sakuraCaption({ text: sakura.data.text, events: sakura.events, invoice: sakuraInvoice });
+LOG.sakura = said.verdict;
+if (said.verdict === 'caught') {
   await readEnough(-1200);
   await ring(sakura.el.locator('.bubble p').filter({ hasText: 'Kioku Guard:' }));
   await ring(sakura.el.locator('.ev').filter({ hasText: 'corrected' }));
-  await caption('Here the model slipped. In Kioku, whatever the model says about money is checked against PayPal before the owner reads it — and PayPal’s status goes in front of the owner.');
-} else if (right) {
+} else if (said.verdict === 'right') {
   await readEnough(-1200);
   await ring(sakura.el.locator('.ev').filter({ hasText: 'checked with PayPal' }));
-  await caption('In Kioku, whatever the model says about money is checked against PayPal before the owner reads it. Here it was right — so the reply carries a “checked with PayPal” receipt.');
-} else if (readPP) {
-  const soundsRight = /36,600|overdue|outstanding|still (?:has|owes|due)|not (?:yet )?paid|hasn.t paid/i.test(sakura.data.text || '');
-  await caption(soundsRight
-    ? 'This time the model got it right: it read the invoice in PayPal before answering. When a reply says who has or hasn’t paid, Kioku checks it against PayPal.'
-    : 'Kioku read Hotel Sakura’s invoice in PayPal before answering — PayPal is the record, not the model’s memory.');
+} else if (said.verdict === 'missed') {
+  LOG.slips.push(`Hotel Sakura: the reply says they paid, PayPal shows #${sakuraInvoice.number} still due, and the guard did not catch it`);
 } else {
-  await caption('This time the reply made no claim about who paid, so there was nothing for the guard to check.');
-  LOG.skipped.push('Hotel Sakura: no claim about paying in the reply');
+  LOG.skipped.push('Hotel Sakura: the guard found no claim about paying in the reply');
 }
+await caption(said.caption);
 await readEnough(200);
 await unring();
 
@@ -435,7 +434,7 @@ if (billing) {
     if (got.png && at() > LATEST.paypalPage) got.skipped = `the take was running late (${at().toFixed(0)} s)`;
     if (got.png && !got.skipped) {
       await readEnough(-800);
-      await showShot(got.png, newInvoice.url);
+      await showShot(got.png);
       await caption('The same invoice on PayPal’s sandbox payment page, where Café Hana can pay it. (Seller account details hidden.)',
         { center: true });
       await readEnough(400);
@@ -452,7 +451,7 @@ if (billing) {
   }
 } else {
   const refused = bill.events.find(e => e.tool === 'create_invoice' && e.decision === 'block');
-  await caption(refused ? `The guard refused the invoice (${refused.rule}): ${refused.detail}.`
+  await caption(refused ? refusalCaption(refused)
     : 'This time the model did not put the invoice through — nothing waits for the owner, so nothing runs in PayPal.');
   LOG.skipped.push('bill: no invoice waited for approval');
 }
@@ -464,16 +463,10 @@ scene('who owes');
 await tab('money');
 await caption('Who owes what is answered from PayPal — overdue and not due yet, exactly as PayPal states it.');
 const owes = await ask('Who still owes me money?');
-const owesFixed = owes.events.find(e => e.rule === 'honesty.paypal_corrected');
+const owesSaid = owesCaption(owes.events);
 await ring(owes.el.locator('.ev.pp'));
-if (owesFixed) {
-  await ring(owes.el.locator('.bubble p').filter({ hasText: 'Kioku Guard:' }));
-  await caption('The model slipped on one invoice — the guard added PayPal’s own status before the owner read it.');
-} else if (owes.events.some(e => e.rule === 'money.check_first')) {
-  await caption('The model first answered without reading PayPal — so Kioku read PayPal itself and had it answer from PayPal’s numbers.');
-} else if (owes.events.some(e => e.rule === 'honesty.paypal_checked') && at() < LATEST.owesReceipts) {
-  await caption('Each “still owes” in the answer was checked against PayPal; the receipts sit under the reply.');
-}
+if (owesSaid.kind === 'slip') await ring(owes.el.locator('.bubble p').filter({ hasText: 'Kioku Guard:' }));
+if (owesSaid.caption && (owesSaid.kind !== 'checked' || at() < LATEST.owesReceipts)) await caption(owesSaid.caption);
 await readEnough(400);
 await unring();
 
@@ -500,7 +493,7 @@ if (recording) {
     : (done.error ? `PayPal did not record it: ${done.error}` : done.result));
 } else {
   const refused = cash.events.find(e => e.tool === 'record_payment' && e.decision === 'block');
-  await caption(refused ? `The guard refused to record it (${refused.rule}): ${refused.detail}.`
+  await caption(refused ? refusalCaption(refused)
     : 'This time the model did not put the payment through, so nothing was recorded in PayPal.');
   LOG.skipped.push('record cash: no payment waited for approval');
 }
@@ -541,7 +534,7 @@ if (scamBill) {
     : `The card: ${scamBill.reason}.`);
 } else {
   const blocked = scam.events.find(e => e.decision === 'block' && /invoice/.test(e.rule));
-  await caption(blocked ? `The guard refused it (${blocked.rule}): ${blocked.detail}.`
+  await caption(blocked ? refusalCaption(blocked)
     : 'The model did not bill anyone from the message — and it could not have changed the address: it never sees customers’ addresses, and only the owner can add a customer.');
 }
 // a message to the address in the email (or anything else queued) waits for the owner like everything else — the owner says no
@@ -558,7 +551,7 @@ if (refusedReminder && refusedReminder.rule === 'invoice.already_paid') {
   await caption('And Kioku won’t chase an invoice PayPal shows as paid — it checked PayPal before anything was queued.');
 } else if (refusedReminder) {
   await ring(remind.el.locator('.ev.block'));
-  await caption(`The guard refused the reminder (${refusedReminder.rule}): ${refusedReminder.detail}.`);
+  await caption(refusalCaption(refusedReminder));
 } else if (remind.events.some(e => e.decision === 'ask')) {
   LOG.skipped.push('reminder: the model queued something else instead of a reminder');
 } else if (checkedPaid) {
@@ -624,7 +617,7 @@ await card(`<h2>How it’s built</h2><div class="lines">
   <p><span class="pp">PayPal Invoicing v2</span> (sandbox)</p>
   <p>NVIDIA Nemotron 3.5 Lightning on Nebius Token Factory</p>
   <p>AG Grid · Render</p></div>
-  <p class="small">Standard-library Python · 191 tests · MIT</p>`, buildMs);
+  <p class="small">Standard-library Python · 236 tests · MIT</p>`, buildMs);
 scene('closing');
 await card(`<div class="mark">記</div><h1>Kioku × PayPal</h1><p>Let the agent do the chasing — PayPal keeps the record.</p>
   <p class="small">${[DEMO, REPO].filter(Boolean).join(' · ')}</p>`, closeMs, { keep: true });
@@ -639,3 +632,4 @@ rmSync(RAW, { recursive: true, force: true });
 saveLog();
 log('done', vids.length ? `${OUT}/${NAME}.webm` : 'no video', `· about ${LOG.length_s} s from the opening card`,
   `· ${LOG.model_calls} model calls, $${LOG.cost_usd}`, LOG.skipped.length ? `· skipped: ${LOG.skipped.join('; ')}` : '');
+if (LOG.slips.length) log(`NOT FOR THE VIDEO — a slip the guard missed: ${LOG.slips.join('; ')}`);
