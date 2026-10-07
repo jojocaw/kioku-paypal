@@ -21,12 +21,13 @@ SYMBOL = {'JPY': '¥', 'USD': '$', 'EUR': '€', 'GBP': '£'}
 AMOUNT = r'(?:[¥$€£]\s?[1-9][\d,]*(?:\.\d+)?|\b[1-9][\d,]*(?:\.\d+)?\s?(?:yen|JPY|USD|EUR|GBP)\b|[1-9][\d,]*\s?円)'
 # What a reply says about where a customer's money stands, clause by clause. A clause is a claim when it refers to a
 # customer — by name, by one of their invoice numbers, or with a word that points back to the customer of the clause just
-# before ("It", "They", "This one", "そこ") — and says a status: paid, settled, cleared, received, in full, no balance,
-# nothing due, shows / marked as paid, closed (支払い済み, 入金済み, 精算済み), or unpaid, outstanding, overdue, still owes,
-# open, pending (未払い, 未入金, 未精算). A line in a list under a heading that says a status ("Still outstanding:", "Paid:",
-# "未払い:") says it about the customer it names, unless the line says its own. "Nothing left to pay" is read first ("has
-# no outstanding balance", "owes you nothing"), then "not paid" ("hasn't paid", "isn't marked as paid", "still has ¥36,600
-# due"), then "paid".
+# before ("It", "They", "This one", "そこ"; "It" only when it cannot mean some other thing that clause brought in, as in
+# "Hotel Sakura called about the oven. It is fixed and paid for.") — and says a status: paid, settled, cleared, received,
+# in full, no balance, nothing due, shows / marked as paid, closed (支払い済み, 入金済み, 精算済み), or unpaid,
+# outstanding, overdue, still owes, open, pending (未払い, 未入金, 未精算). A line in a list under a heading that says a
+# status ("Still outstanding:", "Paid:", "未払い:") says it about the customer it names, unless the line says its own.
+# "Nothing left to pay" is read first ("has no outstanding balance", "owes you nothing"), then "not paid" ("hasn't paid",
+# "isn't marked as paid", "still has ¥36,600 due"), then "paid".
 SAYS_CLEAR = re.compile(r"(?i)\bno\s+(?:outstanding|unpaid)\b|\bnothing\s+(?:is\s+)?(?:still\s+)?(?:due|owed|owing|outstanding|left\s+to\s+pay)\b"
                         r"|\bnothing\s+(?:is\s+|was\s+)?(?:(?:still|currently|now|remaining|left)\s+)+(?:due|owed|owing|outstanding|unpaid)\b"
                         r"|\bnothing\s+(?:left|more|else)\s+to\s+pay\b"
@@ -97,6 +98,19 @@ IFFY = re.compile(r"(?i)\b(?:if|unless|whether|in\s+case|as\s+soon\s+as|once(?!\
 REFER = re.compile(r"(?i)\b(?:it|its|they|them|their|theirs|she|her|hers|he|him|his|this\s+one|that\s+one"
                    r"|(?:this|that|the|their|its|his|her)\s+(?:invoice|bill|balance|payment|customer|client|account))\b"
                    r"|そこ|そちら|こちら|先方|同社|同店|(?:その|この)(?:請求書?|お客(?:様|さん)?|顧客|取引先)")
+# "It" ("its", "this one", "that one") can also mean a thing the clause before brought in after the customer's name:
+# "Hotel Sakura called about the oven. It is fixed and paid for." is about the oven. It points back to the customer only
+# when one of the two clauses is about money, the clause before said a status, or that clause brings in nothing else — a
+# time ("this morning"), the customer themselves ("a long-time customer"), their order, a thing of theirs ("Hotel
+# Sakura's Christmas order is ready. It is paid for.") or a plural ("120 croissants") is not something else.
+REFER_IT = re.compile(r'(?i)(?:it|its|this\s+one|that\s+one)')
+DETERMINER = frozenset('the a an this that these those our your my his her its their some any one two three four five six '
+                       'seven eight nine ten'.split())
+PHRASE_END = frozenset('about for with of on in at to from by into onto over under after before regarding and or but so is are '
+                       'was were be been being has have had will would can could should may might must did does do that which '
+                       'who when while as than last next yesterday today tomorrow tonight ago every'.split())
+NOT_ANOTHER_THING = frozenset('morning afternoon evening night week weekend month year time day days weeks months customer '
+                              'customers client clients regular regulars guest guests order orders account business'.split())
 # A list line ("- Hotel Sakura — ¥36,600", "1. …", "・…") and a heading line ("Still outstanding:", "## Paid", "**未払い：**")
 LIST_ITEM = re.compile(r'^\s*(?:[-*+‣▪●◦]\s|[•·・]|\d{1,3}[.)]\s)')
 HEADING_WORDS = [('unpaid', re.compile(r"(?i)\bnot\s+(?:yet\s+)?due\b|\bdue\s+soon\b|\bupcoming\b|\bopen\b|\bpending\b|\bawaiting\s+payment\b"
@@ -165,6 +179,47 @@ def says(clause: str, money: bool = False) -> str:
         word = re.search(r'(\w+)$', state.group(0)).group(1).lower()
         return 'closed' if word == 'closed' else 'unpaid' if word in ('open', 'pending') else 'paid'
     return ''
+
+
+def another_thing(clause: str, names: list[str]) -> bool:
+    """The clause brings in one thing other than the customer after naming them — "called about the oven", "sent a
+    thank-you note" — which a following "It" more likely means. Not: "Hotel Sakura's Christmas order …" (the customer's
+    own), "this morning", "a long-time customer", "their order", nor a plural ("ordered 120 croissants. It is paid for."
+    is about the order)."""
+    rest = clause
+    for name in names:
+        m = re.search(re.escape(name), rest, re.I)
+        if m:
+            rest = rest[m.end():]
+            if re.match(r"\s*['’]s\b", rest):  # "Hotel Sakura's …": what follows is theirs
+                return False
+    words = re.findall(r"[^\W\d_][\w'’-]*|\d[\d,.]*|[^\w\s]", rest)
+    for i, w in enumerate(words):
+        if w.lower() not in DETERMINER and not w[0].isdigit():
+            continue
+        phrase = []
+        for nxt in words[i + 1:i + 5]:
+            if not nxt[0].isalpha() or nxt.lower() in PHRASE_END:
+                break
+            phrase.append(nxt.lower())
+        head = phrase[-1] if phrase else ''
+        plural = head.endswith('s') and not head.endswith(('ss', 'us', 'is'))
+        if head and head not in NOT_ANOTHER_THING and head not in DETERMINER and not plural:
+            return True
+    return False
+
+
+def points_back(clause: str, before: tuple) -> bool:
+    """A word in the clause points back to the customer of the clause before ("They paid", "their invoice", "そこ"), or
+    "It" does and cannot mean anything else (see REFER_IT). before: (numbers, customers, about money, said a status,
+    the clause)."""
+    found = [m.group(0) for m in REFER.finditer(clause)]
+    if not found:
+        return False
+    if not all(REFER_IT.fullmatch(w) for w in found):
+        return True
+    _, who, money, said, text = before
+    return money or said or bool(MONEY.search(clause)) or not another_thing(text, [c.name for c in who])
 
 
 def status_label(text: str) -> tuple[str, re.Pattern | None]:
@@ -465,10 +520,11 @@ class Money:
         Line by line, sentence by sentence, clause by clause: "Yes, Hotel Sakura paid last week — #0006 still has ¥36,600
         due" says both, and each is checked. Who a clause is about: the customers it names or whose invoice number it gives;
         else, when it points back ("It's marked as settled", "They paid"), the customers of the clause before — in the same
-        sentence or the one before it; else the customer a clause of the same sentence only named ("- **Hotel Sakura** —
-        ¥36,600 overdue"). A list line under a heading that says a status ("Still outstanding:", "Paid:", "未払い：") says the
-        heading's status about the customer it names, unless it says its own; so does a clause after a status and a colon in
-        the same sentence ("Still due: Hotel Sakura ¥36,600")."""
+        sentence or the one before it, and for "It" only when it cannot mean another thing that clause brought in ("Hotel
+        Sakura called about the oven. It is fixed and paid for."); else the customer a clause of the same sentence only
+        named ("- **Hotel Sakura** — ¥36,600 overdue"). A list line under a heading that says a status ("Still
+        outstanding:", "Paid:", "未払い：") says the heading's status about the customer it names, unless it says its own;
+        so does a clause after a status and a colon in the same sentence ("Still due: Hotel Sakura ¥36,600")."""
         if not self.on:
             return []
         customers = [c for c in self.customers.all() if len(norm(c.name)) >= 3]
@@ -494,7 +550,7 @@ class Money:
                 ok = status in PAID if said == 'paid' else status in CLOSED if said == 'closed' else status not in CLOSED
                 out.append({'customer': c.name, 'says': said, 'row': row, 'ok': ok})
 
-        before = None   # (numbers, customers, about money) of the clause just before: what "It" or "They" points back to
+        before = None   # (numbers, customers, about money, said a status, text) of the clause just before: what "It" or "They" points back to
         heading = None  # (status, what a line must name) of a heading line, while the list under it goes on
         for line in (text or '').split('\n'):
             if not line.strip():
@@ -516,7 +572,7 @@ class Money:
                     if named:
                         line_numbers |= numbers
                         line_who += [c for c in who if c not in line_who]
-                    elif before and REFER.search(clause):
+                    elif before and points_back(clause, before):
                         numbers, who, money = before[0], before[1], money or before[2]
                     said = '' if asked else says(clause, money)
                     line_said = line_said or bool(said)
@@ -536,7 +592,7 @@ class Money:
                         elif then_colon:  # "Still due: …", "You have three unpaid invoices: …"
                             state = status_label(clause)
                     if who:
-                        anyone, before = True, (numbers, who, money)
+                        anyone, before = True, (numbers, who, money, bool(said), clause)
                 if not anyone:  # a sentence about no customer: "it" after it points to something else
                     before = None
             if item and heading and line_who and not line_said and (heading[1] is None or heading[1].search(line)):

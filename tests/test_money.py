@@ -596,6 +596,15 @@ def test_take_4_lines_under_still_outstanding_are_each_checked(shop):
     ('Hotel Sakuraの請求書は精算済みです。', ['paid']),
     ("Hotel Sakura's invoice #0001 for ¥36,600 went out on 16 September. It shows as paid.", ['paid']),
     ('Hotel Sakura called this morning. They paid in cash.', ['paid']),
+    # "It" is the customer when nothing else was brought in, or when the talk is of money or a status
+    ('Hotel Sakura called this morning. It is paid in full.', ['paid']),
+    ('Hotel Sakura is a long-time customer. It is paid in full.', ['paid']),
+    ("Hotel Sakura's Christmas order is ready. It is paid for.", ['paid']),
+    ('Hotel Sakura emailed about their order. It is paid for.', ['paid']),
+    ('Hotel Sakura called about the oven. It still has ¥36,600 due.', ['unpaid']),
+    ("Hotel Sakura hasn't paid yet. It is 5 days overdue.", ['unpaid', 'unpaid']),
+    ('Hotel Sakura ordered 120 croissants. They paid in cash.', ['paid']),
+    ('Hotel Sakura ordered 120 croissants. It is paid in full.', ['paid']),  # the order, not the croissants
     ('Hotel Sakuraの請求書#0001を確認しました。そこはまだ未払いです。', ['unpaid']),
     ("Hotel Sakura isn't marked as paid in PayPal.", ['unpaid']),
     ("Hotel Sakura's invoice #0001 is past due.", ['unpaid']),
@@ -614,6 +623,10 @@ def test_take_4_lines_under_still_outstanding_are_each_checked(shop):
     ("Hotel Sakura's breakfast room is open until 10.", []),
     ('Hotel Sakura ordered 120 croissants. They received them at 7.', []),
     ('Hotel Sakura called. The oven is fixed. It is paid for.', []),
+    ('Hotel Sakura called about the oven. It is fixed and paid for.', []),  # "It" is the oven
+    ("Hotel Sakura called about the oven last week. It's paid.", []),
+    ('Hotel Sakura asked about the new menu. It is all settled.', []),
+    ('Hotel Sakura sent a thank-you note. It has been paid.', []),
     ("If Hotel Sakura hasn't paid by Friday, I'll remind them.", []),
     ('Once Hotel Sakura has paid, the task is ticked.', []),
     ('Hotel Sakura usually paid by bank transfer.', []),
