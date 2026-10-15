@@ -86,7 +86,7 @@ await page.addInitScript(() => {
   const css = `
     #rec-cap { position: fixed; right: 26px; bottom: 22px; z-index: 2147483646; max-width: 860px; padding: 14px 24px;
       border-radius: 14px; background: rgba(17, 24, 39, .92); color: #fff; font: 600 23px/1.42 system-ui, -apple-system,
-      "Segoe UI", sans-serif; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,.25); transition: opacity .35s; }
+      "Segoe UI", sans-serif; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,.25); transition: opacity .35s; pointer-events: none; }
     #rec-cap.center { right: auto; left: 50%; transform: translateX(-50%); width: max-content; max-width: 1180px; }
     #rec-card { position: fixed; inset: 0; z-index: 2147483647; display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 18px; background: #12372e; color: #fff; text-align: center;
@@ -534,6 +534,13 @@ if (scamBill) {
     : `The card: ${scamBill.reason}.`);
 } else {
   const blocked = scam.events.find(e => e.decision === 'block' && /invoice/.test(e.rule));
+  if (blocked) {  // point at the refusal's receipt under the reply while the caption says why
+    await readEnough(-500);
+    await unring();
+    const chip = scam.el.locator('.ev.block').filter({ hasText: blocked.tool }).first();
+    await chip.scrollIntoViewIfNeeded().catch(() => {});  // the placeholder box above may have scrolled it out of view
+    await ring(chip);
+  }
   await caption(blocked ? refusalCaption(blocked)
     : 'The model did not bill anyone from the message — and it could not have changed the address: it never sees customers’ addresses, and only the owner can add a customer.');
 }

@@ -313,6 +313,7 @@ NOT_DONE = {'save_memory': 'nothing was saved — passwords and card numbers are
             'make_payment': 'nothing was paid — payments happen only after you approve them',
             'complete_task': 'no task was marked done',
             'queue': 'nothing was queued for your approval — ask again and it will wait in the approvals panel',
+            'queue_refused': 'nothing was queued for your approval — it was refused, and its receipt says why',  # asking again would be refused too
             'create_invoice': 'no invoice was sent — invoices go out through PayPal only after you approve them',
             'send_reminder': 'no reminder was sent — reminders go out only after you approve them',
             'record_payment': 'nothing was recorded in PayPal — a payment is recorded only after you approve it'}

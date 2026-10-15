@@ -146,6 +146,15 @@ def test_queued_with_nothing_queued_is_corrected(make_kioku):
     r = k.chat('Pay Sato Kitchen Service the 350,000 deposit for the third oven.')
     assert r.text.endswith('Kioku Guard: nothing was queued for your approval — ask again and it will wait in the approvals panel.')
     assert k.approvals.list() == []
+    # the guard refused the payment: asking again would be refused too, so the note says it was refused
+    k, fake = make_kioku(('', [('make_payment', {'what': 'deposit, third oven', 'amount': 350000, 'currency': 'JPY',
+                                                 'payee': 'Sato Kitchen Service'})]),
+                         'Queued as payment A-010 — waiting for your approval in the panel.', max_payment=100_000)
+    r = k.chat('Pay Sato Kitchen Service the ¥350,000 deposit for the third oven.')
+    assert [(e.tool, e.decision, e.rule) for e in r.events] == [('make_payment', 'block', 'spend.limit'),
+                                                                ('reply_check', 'block', 'honesty.note_added')]
+    assert r.text.endswith('Kioku Guard: nothing was queued for your approval — it was refused, and its receipt says why.')
+    assert k.approvals.list() == []
 
 
 def test_marked_done_with_no_task_done_is_corrected(make_kioku):
