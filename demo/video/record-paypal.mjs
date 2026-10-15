@@ -31,7 +31,7 @@ const NAME = 'kioku-paypal';
 const RAW = `${OUT}/raw-paypal`;
 const W = 1600, H = 900;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const REPO = esc(process.env.KIOKU_VIDEO_REPO || 'github.com/jojocaw/kioku');
+const REPO = esc(process.env.KIOKU_VIDEO_REPO || 'github.com/jojocaw/kioku-paypal');
 const DEMO = esc(process.env.KIOKU_VIDEO_DEMO || '');
 const END_BY = 171;  // seconds from the opening card: the closing card ends by 2:51 at the latest when replies are quick
 // Extras are left out when the take runs late (seconds from the opening card), so the video stays under three minutes.

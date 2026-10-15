@@ -10,7 +10,7 @@ costly when it is wrong. In Kioku **PayPal is the record**: a question about who
 whatever the model says about money is checked against PayPal before the owner reads it.
 
 - Built with: **PayPal Invoicing v2 REST API** (sandbox) · **NVIDIA Nemotron** on **Nebius Token Factory** ·
-  **AG Grid Community** · hosted on **Render** · standard-library Python, no dependencies · License: MIT
+  **AG Grid Community** · deploys to **Render** (`render.yaml`) · standard-library Python, no dependencies · License: MIT
 - Kioku was first built (2026-10-04/05) for the Nebius × NVIDIA Personal AI hackathon — memory, guard and receipts.
   Everything about money and PayPal below was added during the PayPal AI Hackathon.
 
@@ -186,9 +186,9 @@ Python 3.11 or newer; no packages to install.
 You need a Nebius Token Factory API key (the model) and a free PayPal developer account (the sandbox). Every PayPal
 call goes to the sandbox, so no real money moves; a session like the one below uses a few cents of model time.
 
-1. **Get the code.** The PayPal version is on the `paypal` branch:
+1. **Get the code.**
    ```bash
-   git clone -b paypal https://github.com/jojocaw/kioku kioku-paypal && cd kioku-paypal
+   git clone https://github.com/jojocaw/kioku-paypal && cd kioku-paypal
    echo "NEBIUS_API_KEY=..." > .env          # a Token Factory API key
    ```
 2. **PayPal sandbox keys.** Log in to the PayPal Developer Dashboard and open *Apps & Credentials* (Sandbox). A new
@@ -228,7 +228,7 @@ call goes to the sandbox, so no real money moves; a session like the one below u
 ### Your own Kioku
 
 ```bash
-git clone -b paypal https://github.com/jojocaw/kioku && cd kioku
+git clone https://github.com/jojocaw/kioku-paypal && cd kioku-paypal
 echo "NEBIUS_API_KEY=..." > .env          # a Token Factory API key
 python -m kioku chat                      # talk to your own Kioku (memory in ./data/default)
 python -m kioku.web                       # the same in your browser at http://127.0.0.1:8700
