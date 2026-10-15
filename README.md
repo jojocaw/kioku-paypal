@@ -9,6 +9,7 @@ Agents are good at sounding sure. "Café Hana has paid" or "I've recorded the pa
 costly when it is wrong. In Kioku **PayPal is the record**: a question about who owes what is answered from PayPal, and
 whatever the model says about money is checked against PayPal before the owner reads it.
 
+- Demo video (2:51): https://youtu.be/t6RO3S7tj-M
 - Built with: **PayPal Invoicing v2 REST API** (sandbox) · **NVIDIA Nemotron** on **Nebius Token Factory** ·
   **AG Grid Community** · deploys to **Render** (`render.yaml`) · standard-library Python, no dependencies · License: MIT
 - Kioku was first built (2026-10-04/05) for the Nebius × NVIDIA Personal AI hackathon — memory, guard and receipts.
