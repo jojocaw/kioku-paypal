@@ -1,7 +1,7 @@
 import io
 import json
 import urllib.error
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -9,6 +9,7 @@ import pytest
 from conftest import TZ, FakeLLM
 from kioku.agent import Kioku
 from kioku.config import Settings
+from kioku.money import days_left, days_overdue, overdue_band, owed, totals_by_currency
 from kioku.paypal import PayPal, PayPalError
 
 BREAD = [{'name': 'Baguette', 'quantity': 40, 'unit_price': 320}, {'name': 'Croissant', 'quantity': 24, 'unit_price': 260}]
@@ -654,3 +655,84 @@ def test_closed_is_paid_or_cancelled_and_a_cancelled_invoice_is_not_still_due(sh
     assert v['says'] == 'closed' and v['ok']
     [v] = k.money.verify('Hotel Sakura still owes ¥36,600.')
     assert not v['ok'] and k.money.correction(v) == "PayPal shows Hotel Sakura's invoice #0001 as cancelled (checked 09:30)"
+
+
+# ---------------------------------------------------------------- the Money tab: days overdue, bands, totals, Nudge
+def invoice_row(status='SENT', due_date='', currency='JPY', total='1000', due_amount=None):
+    return {'status': status, 'due_date': due_date, 'currency': currency, 'total': total,
+            'due_amount': total if due_amount is None else due_amount}
+
+
+@pytest.mark.parametrize('due_date,status,late,left,band', [
+    ('2026-10-15', 'SENT', 0, 10, 'open'),             # due later
+    ('2026-10-12', 'SENT', 0, 7, 'soon'),              # due within a week
+    ('2026-10-05', 'UNPAID', 0, 0, 'soon'),            # due today: not late yet
+    ('2026-10-04', 'SENT', 1, -1, 'late'),
+    ('2026-09-28', 'PARTIALLY_PAID', 7, -7, 'late'),
+    ('2026-09-27', 'SENT', 8, -8, 'late-long'),        # more than a week late
+    ('2026-09-01', 'PAID', 0, None, 'paid'),           # paid: never late, whatever the date
+    ('2026-09-01', 'MARKED_AS_PAID', 0, None, 'paid'),
+    ('2026-09-01', 'CANCELLED', 0, None, 'closed'),
+    ('', 'SENT', 0, None, 'open'),                     # no due date
+])
+def test_days_overdue_and_the_band_come_from_the_due_date_and_paypals_status(due_date, status, late, left, band):
+    r, today = invoice_row(status, due_date), date(2026, 10, 5)
+    assert (days_overdue(r, today), days_left(r, today), overdue_band(r, today)) == (late, left, band)
+
+
+def test_totals_are_per_currency_and_yen_and_dollars_are_never_added_together():
+    today = date(2026, 10, 5)
+    rows = [invoice_row('SENT', '2026-09-30', 'JPY', '36600'),                    # 5 days late
+            invoice_row('MARKED_AS_PAID', '2026-10-03', 'JPY', '16880', '0'),
+            invoice_row('SENT', '2026-10-15', 'JPY', '9000'),
+            invoice_row('SENT', '2026-09-20', 'USD', '120.50'),                   # 15 days late
+            invoice_row('PARTIALLY_PAID', '2026-10-30', 'USD', '80.00', '30.25'),
+            invoice_row('CANCELLED', '2026-09-01', 'USD', '50.00')]               # nothing is due on a cancelled invoice
+    jpy, usd = totals_by_currency(rows, today, default='JPY')
+    assert jpy == dict(currency='JPY', invoices=3, open=2, outstanding=Decimal('45600'), overdue_invoices=1, overdue=Decimal('36600'))
+    assert usd == dict(currency='USD', invoices=3, open=2, outstanding=Decimal('150.75'), overdue_invoices=1, overdue=Decimal('120.50'))
+    assert [t['currency'] for t in totals_by_currency(rows, today, default='USD')] == ['USD', 'JPY']  # the owner's own first
+    assert owed(rows[1]) == owed(rows[5]) == 0
+
+
+def test_nudge_makes_a_reminder_card_and_nothing_goes_out_until_the_owner_approves(shop):
+    k, fake, pp = billed(shop)  # Café Hana #0001, ¥19,040, unpaid
+    model_calls = len(fake.sent)
+    r = k.nudge('0001')
+    assert (r['decision'], r['approval'], r['rule']) == ('ask', 'A-002', 'invoice.ask_owner')
+    [item] = k.approvals.list()
+    assert item['tool'] == 'send_reminder' and item['origin'] == 'nudge' and item['arguments'] == {'invoice': '#0001'}
+    assert item['reason'] == 'remind Café Hana about #0001 (¥19,040 due) through PayPal'
+    assert 'remind' not in pp.calls and len(fake.sent) == model_calls  # nothing sent, and the model was not asked
+    [receipt] = [x for x in k.audit.rows() if x['event'] == 'nudge']
+    assert (receipt['id'], receipt['decision'], receipt['tool']) == (item['receipt'], 'ask', 'send_reminder')
+    again = k.nudge('0001')  # pressed twice: the same card, not a second one
+    assert again['approval'] == 'A-002' and again['again'] and len(k.approvals.list()) == 1
+    assert k.pending_reminders() == {'INV2-TEST-0001': 'A-002'}
+    k.decide('A-002', True)  # the owner's Approve on the card: only now does PayPal send the reminder
+    assert pp.calls.count('remind') == 1 and pp.invoices['INV2-TEST-0001']['reminded']
+    assert k.money.ledger.find('#0001')[0]['reminded'] and k.pending_reminders() == {}
+
+
+def test_a_rejected_nudge_sends_nothing(shop):
+    k, fake, pp = billed(shop)
+    k.nudge('0001')
+    k.decide('A-002', False)
+    assert 'remind' not in pp.calls and k.approvals.list(None)[-1]['status'] == 'rejected'
+
+
+def test_nudge_goes_through_the_same_guard_as_the_models_reminder(shop):
+    k, fake, pp = billed(shop)
+    r = k.nudge('0001', note='Please pay at https://cafe-hana-pay.example/now')  # an address in the note: refused
+    assert (r['decision'], r['rule']) == ('block', 'invoice.note_contact') and k.approvals.list() == []
+    k.nudge('0001', note='A friendly reminder about the October bread.')
+    [item] = k.approvals.list()
+    assert item['reason'].endswith('— note to the customer: “A friendly reminder about the October bread.”')
+    k.decide(item['id'], True)
+    assert pp.invoices['INV2-TEST-0001']['reminder_note'] == 'A friendly reminder about the October bread.'
+    pp.customer_pays('INV2-TEST-0001')  # paid on PayPal's page after the grid was drawn: PayPal is read before any card
+    r = k.nudge('0001')
+    assert (r['decision'], r['rule']) == ('block', 'invoice.already_paid') and k.approvals.list() == []
+    with pytest.raises(KeyError):
+        k.nudge('0099')
+    assert pp.calls.count('remind') == 1  # only the one the owner approved

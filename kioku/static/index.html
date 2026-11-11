@@ -75,8 +75,15 @@
     <div class="view" id="panel-money" hidden>
       <p class="lead">Invoices, reminders and payments received go through <strong>PayPal</strong> — only after you approve them. Kioku keeps a copy, but <strong>PayPal is the record</strong>: whenever a status matters Kioku reads it from PayPal, and the guard checks anything the model says about who has paid.</p>
       <div class="money-sum" id="money-sum"></div>
-      <div class="money-bar"><button type="button" id="money-refresh">Read PayPal again</button><span class="fine" id="money-note"></span></div>
+      <div class="money-bar">
+        <button type="button" id="money-refresh">Read PayPal again</button>
+        <button type="button" id="money-csv" hidden title="The invoices as the grid shows them (filter and sort), without the Nudge buttons">Export CSV</button>
+        <input type="search" id="money-filter" placeholder="Filter: customer, item, status…" aria-label="Filter the invoices" maxlength="80" hidden>
+        <span class="fine" id="money-note"></span>
+      </div>
+      <p class="fine nudge-out" id="nudge-out" aria-live="polite"></p>
       <div id="invoice-grid" class="invoice-grid"></div>
+      <p class="fine">Most overdue first, one total per currency. <strong>Nudge</strong> only makes a reminder card in Approvals — nothing goes to the customer until you approve it.</p>
       <h3 class="sub">Customer book</h3>
       <p class="fine">Only you can add customers — the model has no tool for it, so a message can never add a new payee. Email addresses stay on your side; the model knows customers by name.</p>
       <ul class="customers" id="customers"></ul>

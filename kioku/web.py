@@ -33,7 +33,7 @@ from .agent import Kioku
 from .config import Settings
 from .llm import CreditsExhausted, LLMError
 from .memory import week_id
-from .money import fmt
+from .money import days_left, days_overdue, fmt, overdue_band, owed, totals_by_currency
 from .paypal import CLOSED, PAID, PayPal, PayPalError
 from .tools import INVOICE_TOOL_NAMES
 
@@ -47,6 +47,7 @@ NEW_PER_IP_HOUR = 12       # new sandboxes per network per hour (a reload keeps 
 PAYPAL_PER_HOUR = 8        # approved invoices, reminders and recorded payments per visitor per hour (PayPal sandbox)
 PAYPAL_PER_DAY = 300       # the same for all visitors together
 REFRESH_PER_HOUR = 30      # "read PayPal again" per visitor per hour
+NUDGE_PER_HOUR = 20        # Nudge buttons per visitor per hour (each reads one invoice from PayPal; sending needs Approve)
 # In the public demo, customers can only be added with reserved addresses (RFC 2606/6761): nobody real gets an invoice.
 DEMO_EMAIL = re.compile(r'(?i)@(?:[\w-]+\.)*(?:example\.(?:com|net|org)|[\w-]+\.(?:example|test|invalid))$')
 
@@ -220,26 +221,32 @@ class App:
         if not money.on:
             return dict(on=False)
         rows, today = money.ledger.all(), s.k.clock().date()
-        open_ = [r for r in rows if r.get('status') not in CLOSED]
-        late = [r for r in open_ if r.get('due_date') and date.fromisoformat(r['due_date']) < today]
-        due = sum(float(r.get('due_amount') or r['total']) for r in open_)
-        return dict(on=True, sandbox=getattr(self.paypal, 'sandbox', True), open=len(open_), overdue=len(late),
-                    due=fmt(due, money.currency), customers=len(money.customers.all()))
+        sums = totals_by_currency(rows, today, money.currency)  # each currency on its own: yen and dollars never add up
+        each = lambda key: ' · '.join(fmt(t[key], t['currency']) for t in sums if t[key])  # noqa: E731
+        return dict(on=True, sandbox=getattr(self.paypal, 'sandbox', True), open=sum(t['open'] for t in sums),
+                    overdue=sum(t['overdue_invoices'] for t in sums), due=each('outstanding') or fmt(0, money.currency),
+                    overdue_due=each('overdue'), customers=len(money.customers.all()))
 
     def invoices(self, s: Space) -> dict:
-        money, today = s.k.money, s.k.clock().date()
+        """The Money tab's grid: each invoice as PayPal last stated it, with its days overdue and band, the reminder
+        waiting for the owner (if any), and one totals row per currency."""
+        k, today = s.k, s.k.clock().date()
+        money = k.money
+        rows = money.ledger.all()
+        waiting = k.pending_reminders() if money.on else {}
         out = []
-        for r in money.ledger.all()[::-1]:
-            late = 0
-            if r.get('status') not in CLOSED and r.get('due_date'):
-                late = max(0, (today - date.fromisoformat(r['due_date'])).days)
-            out.append(dict(number=r.get('number', ''), customer=r['customer'], total=float(r['total']),
-                            due=float(r.get('due_amount') or 0), status=r.get('status', ''), due_date=r.get('due_date', ''),
-                            late=late, created=r.get('created', '')[:10], checked=r.get('checked', '')[:16].replace('T', ' '),
-                            paid=r.get('status') in PAID, url=r.get('payer_url', ''), shared=bool(r.get('shared')),
-                            approval=r.get('approval', ''),
+        for r in rows[::-1]:
+            out.append(dict(number=r.get('number', ''), customer=r['customer'], currency=r.get('currency') or money.currency,
+                            total=float(r['total']), due=float(owed(r)), status=r.get('status', ''), due_date=r.get('due_date', ''),
+                            late=days_overdue(r, today), due_in=days_left(r, today), band=overdue_band(r, today),
+                            created=r.get('created', '')[:10], checked=r.get('checked', '')[:16].replace('T', ' '),
+                            paid=r.get('status') in PAID, closed=r.get('status') in CLOSED, url=r.get('payer_url', ''),
+                            shared=bool(r.get('shared')), approval=r.get('approval', ''),
+                            reminded=r.get('reminded', '')[:16].replace('T', ' '), nudge=waiting.get(r['id'], ''),
                             items=', '.join(f'{i["name"]} {i["quantity"]} × {fmt(i["unit_price"], r["currency"])}' for i in r.get('items', []))))
-        return dict(on=money.on, currency=money.currency, rows=out, summary=self.money_summary(s))
+        sums = [{**t, 'outstanding': float(t['outstanding']), 'overdue': float(t['overdue'])}
+                for t in totals_by_currency(rows, today, money.currency)]
+        return dict(on=money.on, currency=money.currency, rows=out, totals=sums, summary=self.money_summary(s))
 
     def paypal_write_ok(self, s: Space) -> str:
         """'' when this visitor may carry out one more PayPal action now, else why not."""
@@ -469,6 +476,18 @@ def make_handler(app: App):
                 except PayPalError as e:
                     return self._json(502, dict(error=str(e)), new_sid)
                 return self._json(200, app.invoices(s), new_sid)
+            if url.path == '/api/invoices/nudge':  # the owner's control: a reminder card for one invoice — nothing is sent here
+                if not s.k.money.on:
+                    return self._json(400, dict(error='PayPal is not connected.'), new_sid)
+                if app.seed and not s.allow('nudge', NUDGE_PER_HOUR):
+                    return self._json(429, dict(error=f'Demo limit: {NUDGE_PER_HOUR} nudges an hour per visitor.'), new_sid)
+                number = str(body.get('number', '')).strip().lstrip('#')[:40]
+                try:
+                    with s.lock:
+                        result = s.k.nudge(number, str(body.get('note', ''))[:2000])
+                except KeyError:
+                    return self._json(404, dict(error=f'No invoice #{number} in your list.'), new_sid)
+                return self._json(200, result, new_sid)
             if url.path == '/api/customers':  # the owner's control: the model has no tool that adds customers
                 name, email = str(body.get('name', '')).strip()[:80], str(body.get('email', '')).strip()[:120]
                 if app.seed and not DEMO_EMAIL.search(email):

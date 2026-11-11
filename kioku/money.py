@@ -361,6 +361,67 @@ def describe_items(items: list[dict], currency: str) -> str:
     return ', '.join(f'{i["name"]} {plain(i["quantity"])} × {fmt(i["unit_price"], currency)}' for i in items)
 
 
+# ---------------------------------------------------------------- the Money tab: days overdue, bands, totals
+SOON_DAYS = 7       # an open invoice due within a week is "due soon"
+LONG_LATE_DAYS = 7  # more than a week past its due date is the strongest band
+
+
+def owed(row: dict) -> Decimal:
+    """What is still due on an invoice, as PayPal last said — nothing once it is paid, cancelled or refunded."""
+    if row.get('status') in CLOSED:
+        return Decimal(0)
+    return Decimal(str(row.get('due_amount') or row.get('total') or 0))
+
+
+def days_left(row: dict, today: date) -> int | None:
+    """Days until an open invoice is due: 0 on the day, below 0 once it is late. None when it is paid, cancelled or
+    refunded, or has no due date."""
+    if row.get('status') in CLOSED or not row.get('due_date'):
+        return None
+    return (date.fromisoformat(row['due_date']) - today).days
+
+
+def days_overdue(row: dict, today: date) -> int:
+    """Whole days an open invoice is past its due date; 0 when it is not late, or is paid, cancelled or refunded."""
+    left = days_left(row, today)
+    return -left if left is not None and left < 0 else 0
+
+
+def overdue_band(row: dict, today: date) -> str:
+    """Where an invoice stands on the Money tab: 'paid'; 'closed' (cancelled or refunded); 'late-long' (more than a week
+    late); 'late' (1–7 days late); 'soon' (due within a week); 'open' (due later, or no due date)."""
+    if row.get('status') in PAID:
+        return 'paid'
+    if row.get('status') in CLOSED:
+        return 'closed'
+    late, left = days_overdue(row, today), days_left(row, today)
+    if late > LONG_LATE_DAYS:
+        return 'late-long'
+    if late:
+        return 'late'
+    return 'soon' if left is not None and left <= SOON_DAYS else 'open'
+
+
+def totals_by_currency(rows: list[dict], today: date, default: str = 'JPY') -> list[dict]:
+    """One total per currency — yen and dollars are never added together: how many invoices, how many are open, what
+    is still due on them (outstanding) and how much of that is overdue. Amounts are exact (Decimal); the owner's own
+    currency comes first."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        cur = r.get('currency') or default
+        t = out.setdefault(cur, dict(currency=cur, invoices=0, open=0, outstanding=Decimal(0), overdue_invoices=0,
+                                     overdue=Decimal(0)))
+        t['invoices'] += 1
+        if r.get('status') in CLOSED:
+            continue
+        t['open'] += 1
+        t['outstanding'] += owed(r)
+        if days_overdue(r, today):
+            t['overdue_invoices'] += 1
+            t['overdue'] += owed(r)
+    return sorted(out.values(), key=lambda t: (t['currency'] != default, t['currency']))
+
+
 class Money:
     def __init__(self, data_dir: Path, paypal: PayPal | None, clock, currency: str = 'JPY',
                  max_invoice: float = 300_000, notify: bool = True):

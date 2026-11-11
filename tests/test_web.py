@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -251,3 +252,59 @@ def test_the_page_may_load_the_invoice_grid_from_the_cdn_only(demo):
     with urllib.request.urlopen(base + '/') as r:
         csp = r.headers['Content-Security-Policy']
     assert "script-src 'self' https://cdn.jsdelivr.net" in csp and "default-src 'self'" in csp
+
+
+def test_the_money_tab_gives_each_invoice_its_days_overdue_and_band_and_totals_per_currency(shop):
+    app, base, scripted, pp = shop
+    code, d, _ = call(base, '/api/invoices')
+    [row] = d['rows']  # Hotel Sakura #0001, due 30 September; the demo's today is 5 October
+    assert (row['late'], row['due_in'], row['band'], row['currency'], row['due'], row['nudge']) == (5, -5, 'late', 'JPY', 31200, '')
+    assert d['totals'] == [dict(currency='JPY', invoices=1, open=1, outstanding=31200, overdue_invoices=1, overdue=31200)]
+
+
+def test_yen_and_dollars_are_totalled_apart(shop):
+    app, base, scripted, pp = shop
+    ledger = json.loads((app.seed / 'invoices.json').read_text())
+    ledger.append({'id': 'INV2-USD-0001', 'number': '0009', 'status': 'SENT', 'currency': 'USD', 'total': '120.50',
+                   'due_amount': '120.50', 'paid_amount': '0', 'due_date': '2026-10-12', 'payer_url': '', 'customer': 'Café Hana',
+                   'items': [], 'created': '2026-09-28T17:00:00+09:00', 'shared': True, 'checked': ''})
+    (app.seed / 'invoices.json').write_text(json.dumps(ledger))
+    code, d, _ = call(base, '/api/invoices')
+    assert [(t['currency'], t['outstanding'], t['overdue']) for t in d['totals']] == [('JPY', 31200, 31200), ('USD', 120.5, 0)]
+    assert [(r['number'], r['currency'], r['band']) for r in d['rows']] == [('0009', 'USD', 'soon'), ('0001', 'JPY', 'late')]
+    code, st, _ = call(base, '/api/state')
+    assert st['money']['due'] == '¥31,200 · $120.50' and st['money']['overdue_due'] == '¥31,200' and st['money']['open'] == 2
+
+
+def test_the_nudge_button_only_makes_an_approval_card(shop, monkeypatch):
+    app, base, scripted, pp = shop
+    bread = [{'name': 'Baguette', 'quantity': 30, 'unit_price': 320}]
+    scripted += [('', [('create_invoice', {'customer': 'Café Hana', 'items': bread})]), 'Waiting for your approval.']
+    code, r, set_cookie = call(base, '/api/chat', {'text': 'Bill Café Hana for 30 baguettes at ¥320.'})
+    cookie = set_cookie.split(';')[0]
+    call(base, '/api/approvals/decide', {'id': 'A-001', 'approve': True}, cookie)  # Café Hana #0002, ¥9,600
+    space = next(iter(app.spaces.values()))
+    model_calls = len(space.k.llm.sent)
+    code, n, _ = call(base, '/api/invoices/nudge', {'number': '0002'}, cookie)
+    assert code == 200 and (n['decision'], n['approval']) == ('ask', 'A-002')
+    assert 'remind' not in pp.calls and len(space.k.llm.sent) == model_calls  # nothing sent; the model was not asked
+    _, d, _ = call(base, '/api/invoices', cookie=cookie)
+    assert {x['number']: x['nudge'] for x in d['rows']} == {'0002': 'A-002', '0001': ''}
+    _, a, _ = call(base, '/api/approvals', cookie=cookie)
+    [card] = [i for i in a['items'] if i['id'] == 'A-002']
+    assert card['status'] == 'pending' and card['origin'] == 'nudge' and card['reason'].startswith('remind Café Hana about #0002')
+    code, n, _ = call(base, '/api/invoices/nudge', {'number': '0001'}, cookie)  # the demo's shared invoice stays as it is
+    assert code == 200 and (n['decision'], n['rule']) == ('block', 'demo.shared_invoice')
+    assert call(base, '/api/invoices/nudge', {'number': '9999'}, cookie)[0] == 404
+    code, r, _ = call(base, '/api/approvals/decide', {'id': 'A-002', 'approve': True}, cookie)  # the owner approves: now it goes
+    assert code == 200 and 'Reminder sent to Café Hana about invoice #0002' in r['result'] and pp.calls.count('remind') == 1
+    monkeypatch.setattr(web, 'NUDGE_PER_HOUR', 0)
+    assert call(base, '/api/invoices/nudge', {'number': '0002'}, cookie)[0] == 429
+
+
+def test_the_page_uses_ag_grid_community_pinned_by_version_and_hash():
+    page = (web.STATIC / 'index.html').read_text(encoding='utf-8')
+    script = (web.STATIC / 'app.js').read_text(encoding='utf-8')
+    assert ('https://cdn.jsdelivr.net/npm/ag-grid-community@36.2.0/dist/ag-grid-community.min.js" '
+            'integrity="sha384-icvtRKM0YJJgeDhXnWY8UlF1PVBFd4K8Pj61la+vG+EU+awBeoP0xGPZhCD2SQOV"') in page
+    assert 'ag-grid-enterprise' not in page + script and not re.search(r'LicenseManager|setLicenseKey', script)  # no licence key

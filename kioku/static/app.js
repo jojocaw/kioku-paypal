@@ -250,7 +250,7 @@ async function openNote(path) {
 // ---------------------------------------------------------------- guard
 let guardRows = [];
 let guardFilter = 'all';
-const WHAT = { model_call: 'model call', tool_call: 'tool call', approval: 'approval' };
+const WHAT = { model_call: 'model call', tool_call: 'tool call', approval: 'approval', nudge: 'Nudge button' };
 async function loadGuard(flash) {
   const g = await api('/api/audit');
   if (g.error) return;
@@ -287,7 +287,8 @@ async function loadApprovals() {
   const card = i => {
     const args = i.arguments || {};
     const pp = /invoice|reminder|record_payment/.test(i.tool);
-    const rows = (pp ? [['what', null]] : []).concat(Object.entries(args))
+    const rows = (pp ? [['what', null]] : []).concat(i.origin === 'nudge' ? [['asked by', 'you — the Nudge button on the Money tab']] : [],
+      Object.entries(args))
       .map(([k, v]) => k === 'what' && v === null ? `<dt>what</dt><dd><strong>${esc(i.reason)}</strong></dd>` : `<dt>${esc(k)}</dt><dd>${value(k, v)}</dd>`).join('');
     const outcome = i.result ? `<p class="outcome ${esc(i.outcome || '')}">${esc(i.result)}</p>` : '';
     return `<div class="card ${i.status}${pp ? ' pp' : ''}">
@@ -310,6 +311,10 @@ async function decide(id, approve) {
 }
 
 // ---------------------------------------------------------------- money (PayPal)
+// The invoice grid is AG Grid Community: bands from cellClassRules / rowClassRules, most overdue first, a totals row per
+// currency pinned at the bottom, a Nudge button pinned on the right, CSV export and a quick filter. Days overdue, bands and
+// totals are worked out on the server (kioku/money.py), exactly and per currency; the page only shows them. Without the
+// CDN the page shows the same rows, bands and buttons in a plain table.
 let invoiceGrid = null;
 let CUR = 'JPY';
 function fmtMoney(v, cur = CUR) {
@@ -319,64 +324,136 @@ function fmtMoney(v, cur = CUR) {
 }
 const STATUS = { DRAFT: 'draft', SENT: 'sent', UNPAID: 'sent', SCHEDULED: 'scheduled', PAID: 'paid', MARKED_AS_PAID: 'paid (recorded)',
   PARTIALLY_PAID: 'partly paid', CANCELLED: 'cancelled', REFUNDED: 'refunded', MARKED_AS_REFUNDED: 'refunded' };
+const BANDS = ['late-long', 'late', 'soon', 'open', 'paid', 'closed'];  // kioku/money.py overdue_band()
 function statusPill(r) {
-  const cls = r.paid ? 'paid' : r.status === 'CANCELLED' ? 'cancelled' : r.late ? 'late' : 'open';
-  const text = (STATUS[r.status] || r.status.toLowerCase()) + (r.late ? ` · ${r.late} day${r.late > 1 ? 's' : ''} late` : '');
-  return `<span class="pill-st ${cls}">${esc(text)}</span>`;
+  const cls = r.paid ? 'paid' : r.closed ? 'cancelled' : 'open';
+  return `<span class="pill-st ${cls}">${esc(STATUS[r.status] || r.status.toLowerCase())}</span>`;
 }
+// The Overdue column says its band in words, so colour is never the only sign.
+function overdueText(r) {
+  if (r.late > 0) return `${r.late}d late`;
+  if (r.due_in === 0) return 'due today';
+  if (r.due_in > 0) return `due in ${r.due_in}d`;
+  return '—';  // paid, cancelled or refunded, or no due date
+}
+// Most overdue first, then the soonest due; invoices with no due date, then paid or closed ones, last.
+const overdueKey = r => (r.due_in === null || r.due_in === undefined ? (r.paid || r.closed ? -2e9 : -1e9) : -r.due_in);
+function bandRules(prefix) {  // AG Grid class rules: one class per band, never on a totals row
+  const rules = {};
+  for (const b of BANDS) rules[prefix + b] = p => !p.node.rowPinned && p.data.band === b;
+  return rules;
+}
+function nudgeCell(r) {  // the owner's Nudge button: it only makes a reminder card in Approvals
+  if (r.paid || r.closed) return '';
+  if (r.nudge) return `<button type="button" class="nudge wait" data-go="approvals" title="${esc(`${r.nudge}: the reminder card waits for you in Approvals`)}">Waiting</button>`;
+  if (r.shared) return '<button type="button" class="nudge" disabled title="Shared by everyone trying the demo, so it stays as it is — bill a customer, then nudge that invoice">Nudge</button>';
+  const last = r.reminded ? ` (last reminder: ${r.reminded})` : '';
+  return `<button type="button" class="nudge" data-nudge="${esc(r.number)}" title="${esc(`Make a reminder card for #${r.number} — nothing goes to ${r.customer} until you approve it${last}`)}">${r.reminded ? 'Nudge again' : 'Nudge'}</button>`;
+}
+function totalRows(totals) {  // one pinned row per currency: yen and dollars are never added together
+  return (totals || []).map(t => ({ pinned: true, currency: t.currency, label: `Total · ${t.currency}`,
+    customer: `${t.open} of ${t.invoices} open`, due: t.outstanding, overdue: t.overdue }));
+}
+const overdueTotal = t => (t.overdue ? `<span class="od">${esc(fmtMoney(t.overdue, t.currency))} late</span>` : '');
 function invoiceColumns() {
-  const money = p => fmtMoney(p.value);
+  const total = p => !!p.node.rowPinned;
+  const money = p => fmtMoney(p.value, p.data.currency);
   return [
-    { field: 'number', headerName: 'Invoice', width: 132, valueFormatter: p => `#${p.value}`,
-      cellRenderer: p => `#${esc(p.value)}${p.data.shared ? ' <span class="shared" title="Shared by everyone trying the demo: read-only">demo</span>' : ''}` },
-    { field: 'customer', headerName: 'Customer', flex: 1, minWidth: 110 },
-    { field: 'total', headerName: 'Total', type: 'rightAligned', valueFormatter: money, width: 96 },
-    { field: 'due', headerName: 'Still due', type: 'rightAligned', valueFormatter: money, width: 96 },
-    { field: 'status', headerName: 'PayPal says', width: 166, cellRenderer: p => statusPill(p.data),
-      comparator: (a, b, na, nb) => (nb.data.late - na.data.late) || String(a).localeCompare(String(b)) },
-    { field: 'due_date', headerName: 'Due', width: 104, headerTooltip: 'Issued dates are in the tooltip of each row', tooltipValueGetter: p => `issued ${p.data.created}` },
+    { field: 'number', headerName: 'Invoice', width: 132, getQuickFilterText: p => `#${p.value}`,
+      cellRenderer: p => (total(p) ? `<strong>${esc(p.data.label)}</strong>`
+        : `#${esc(p.value)}${p.data.shared ? ' <span class="shared" title="Shared by everyone trying the demo: read-only">demo</span>' : ''}`) },
+    { field: 'customer', headerName: 'Customer', flex: 1, minWidth: 124 },
+    { field: 'due', headerName: 'Still due', type: 'rightAligned', width: 96, valueFormatter: money,
+      cellClassRules: { 'due-late': p => !total(p) && p.data.late > 0 } },
+    { field: 'late', headerName: 'Overdue', width: 128, sort: 'desc', cellClassRules: bandRules('od-'),
+      headerTooltip: 'Days past the due date, for unpaid invoices — most overdue first',
+      comparator: (a, b, na, nb) => overdueKey(na.data) - overdueKey(nb.data), getQuickFilterText: p => overdueText(p.data),
+      cellRenderer: p => (total(p) ? overdueTotal(p.data) : `<span class="od">${esc(overdueText(p.data))}</span>`) },
+    { field: 'status', headerName: 'PayPal says', width: 140, getQuickFilterText: p => STATUS[p.value] || p.value,
+      cellRenderer: p => (total(p) ? '' : statusPill(p.data)) },
+    { field: 'due_date', headerName: 'Due', width: 104, tooltipValueGetter: p => (total(p) ? undefined : `issued ${p.data.created}`) },
+    { field: 'total', headerName: 'Total', type: 'rightAligned', width: 100, valueFormatter: money },
     { field: 'items', headerName: 'Items', flex: 1.4, minWidth: 160, tooltipField: 'items' },
-    { field: 'url', headerName: '', width: 104, sortable: false,
-      cellRenderer: p => p.value ? `<a href="${esc(p.value)}" target="_blank" rel="noopener noreferrer">payer page ↗</a>` : '' },
+    { field: 'url', headerName: 'PayPal page', width: 112, sortable: false, getQuickFilterText: () => '',
+      cellRenderer: p => (p.value ? `<a href="${esc(p.value)}" target="_blank" rel="noopener noreferrer">payer page ↗</a>` : '') },
+    { field: 'currency', hide: true }, { field: 'created', hide: true },  // for the CSV
+    { colId: 'nudge', headerName: '', width: 120, pinned: 'right', sortable: false, resizable: false,
+      cellRenderer: p => (total(p) ? '' : nudgeCell(p.data)) },
   ];
 }
-function plainInvoiceTable(rows) {  // when AG Grid could not load from the CDN
-  return `<div class="table-wrap"><table><thead><tr><th>Invoice</th><th>Customer</th><th class="num">Total</th><th class="num">Still due</th><th>PayPal says</th><th>Due</th><th>Items</th></tr></thead><tbody>${
-    rows.map(r => `<tr><td class="mono">#${esc(r.number)}</td><td>${esc(r.customer)}</td><td class="num">${esc(fmtMoney(r.total))}</td><td class="num">${esc(fmtMoney(r.due))}</td><td>${statusPill(r)}</td><td class="mono">${esc(r.due_date)}</td><td>${esc(r.items)}</td></tr>`).join('')
-    || '<tr><td colspan="7" class="empty">No invoices yet.</td></tr>'}</tbody></table></div>`;
+// CSV export: every column but the Nudge button, raw amounts with their currency, the rows as filtered and sorted.
+const CSV = { number: 'Invoice', customer: 'Customer', currency: 'Currency', total: 'Total', due: 'Still due', late: 'Days overdue',
+  status: 'PayPal status', due_date: 'Due date', created: 'Issued', items: 'Items', url: 'PayPal payer page' };
+function csvCell(p) {
+  const v = p.column.getColId() === 'number' ? `#${p.value}` : String(p.value ?? '');
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;  // text a spreadsheet would run as a formula stays text
+}
+function exportInvoices() {
+  if (!invoiceGrid) return;
+  invoiceGrid.exportDataAsCsv({ fileName: `kioku-invoices-${((STATE && STATE.now) || '').slice(0, 10) || 'today'}.csv`,
+    columnKeys: Object.keys(CSV), skipPinnedBottom: true, processCellCallback: csvCell,
+    processHeaderCallback: p => CSV[p.column.getColId()] });
+}
+function plainInvoiceTable(rows, totals) {  // when AG Grid could not load from the CDN: the same rows, bands and buttons
+  const body = [...rows].sort((a, b) => overdueKey(b) - overdueKey(a)).map(r => `<tr class="inv-${esc(r.band)}">
+    <td class="mono">#${esc(r.number)}</td><td>${esc(r.customer)}</td><td class="num${r.late > 0 ? ' due-late' : ''}">${esc(fmtMoney(r.due, r.currency))}</td>
+    <td class="od-${esc(r.band)}"><span class="od">${esc(overdueText(r))}</span></td><td>${statusPill(r)}</td><td class="mono">${esc(r.due_date)}</td>
+    <td class="num">${esc(fmtMoney(r.total, r.currency))}</td><td>${esc(r.items)}</td><td>${nudgeCell(r)}</td></tr>`).join('');
+  const foot = totalRows(totals).map(t => `<tr class="inv-total"><td>${esc(t.label)}</td><td>${esc(t.customer)}</td>
+    <td class="num">${esc(fmtMoney(t.due, t.currency))}</td><td>${overdueTotal(t)}</td><td colspan="5"></td></tr>`).join('');
+  return `<div class="table-wrap"><table class="plain-invoices"><thead><tr><th>Invoice</th><th>Customer</th><th class="num">Still due</th><th>Overdue</th>
+    <th>PayPal says</th><th>Due</th><th class="num">Total</th><th>Items</th><th></th></tr></thead>
+    <tbody>${body || '<tr><td colspan="9" class="empty">No invoices yet.</td></tr>'}</tbody>${foot ? `<tfoot>${foot}</tfoot>` : ''}</table></div>`;
 }
 function gridTheme() {
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
   const css = getComputedStyle(document.documentElement);
   const v = name => css.getPropertyValue(name).trim();
-  const base = agGrid.themeQuartz.withParams({
+  // the dark colour scheme first, then the page's own colours: a part added later would override them (every other row)
+  const scheme = dark && agGrid.colorSchemeDark ? agGrid.themeQuartz.withPart(agGrid.colorSchemeDark) : agGrid.themeQuartz;
+  return scheme.withParams({
     fontFamily: 'inherit', fontSize: 13, headerFontWeight: 600, accentColor: v('--accent'), borderColor: v('--line'),
     backgroundColor: v('--panel'), foregroundColor: v('--ink'), headerBackgroundColor: v('--soft'), oddRowBackgroundColor: v('--panel'),
-    rowHoverColor: v('--me'), wrapperBorderRadius: 10, spacing: 6,
+    rowHoverColor: v('--me'), wrapperBorderRadius: 10, spacing: 6, pinnedRowBackgroundColor: v('--soft'), pinnedRowFontWeight: 600,
   });
-  return dark && agGrid.colorSchemeDark ? base.withPart(agGrid.colorSchemeDark) : base;
 }
 function renderInvoices(d) {
   const el = $('#invoice-grid');
-  if (!window.agGrid || !agGrid.createGrid) { el.innerHTML = plainInvoiceTable(d.rows); return; }
+  if (!window.agGrid || !agGrid.createGrid) { el.innerHTML = plainInvoiceTable(d.rows, d.totals); return; }
   if (!invoiceGrid) {
     try { if (agGrid.ModuleRegistry && agGrid.AllCommunityModule) agGrid.ModuleRegistry.registerModules([agGrid.AllCommunityModule]); } catch (e) { /* already registered */ }
     invoiceGrid = agGrid.createGrid(el, {
-      theme: gridTheme(), columnDefs: invoiceColumns(), rowData: d.rows, domLayout: 'autoHeight', getRowId: p => p.data.number,
+      theme: gridTheme(), columnDefs: invoiceColumns(), rowData: d.rows, pinnedBottomRowData: totalRows(d.totals),
+      domLayout: 'autoHeight', getRowId: p => (p.data.pinned ? `total-${p.data.currency}` : String(p.data.number)),
       defaultColDef: { sortable: true, resizable: true, suppressHeaderMenuButton: true },
-      rowClassRules: { 'row-late': p => p.data.late > 0, 'row-paid': p => p.data.paid },
+      rowClassRules: { ...bandRules('inv-'), 'inv-total': p => !!p.node.rowPinned },
       tooltipShowDelay: 300, overlayNoRowsTemplate: '<span class="empty">No invoices yet — ask Kioku to bill a customer.</span>',
     });
+    $('#money-csv').hidden = false;
+    $('#money-filter').hidden = false;
   } else {
     invoiceGrid.setGridOption('rowData', d.rows);
+    invoiceGrid.setGridOption('pinnedBottomRowData', totalRows(d.totals));
+    invoiceGrid.refreshCells({ force: true });  // the Nudge cell and the badge follow more than their own column's value
   }
+}
+async function nudge(number, btn) {  // the owner's Nudge button: a reminder card in Approvals — nothing is sent here
+  btn.disabled = true;
+  const r = await api('/api/invoices/nudge', { number });
+  const out = $('#nudge-out');
+  if (r.error) { out.className = 'fine nudge-out block'; out.textContent = r.error; btn.disabled = false; return; }
+  out.className = `fine nudge-out ${r.decision === 'ask' ? 'ask' : 'block'}`;
+  out.innerHTML = r.decision === 'ask'
+    ? `<strong>${esc(r.approval)}</strong> ${r.again ? 'is still waiting' : 'waits'} for your approval: ${esc(r.reason)}. Nothing goes out until you approve it. <button type="button" data-go="approvals">Open Approvals</button>`
+    : `Kioku Guard refused it: ${esc(r.reason)} <span class="mono">${esc(r.receipt)}</span>`;
+  loadApprovals();
+  loadMoney();
 }
 function renderMoneySummary(d) {
   const sm = d.summary || {};
-  const late = d.rows.filter(r => r.late > 0);
   const paid = d.rows.filter(r => r.paid);
-  $('#money-sum').innerHTML = [
-    [sm.open, `open · ${sm.due} still due`, ''], [late.length, `overdue · ${fmtMoney(late.reduce((a, r) => a + r.due, 0))}`, late.length ? 'late' : ''],
+  $('#money-sum').innerHTML = [  // amounts per currency, worked out on the server
+    [sm.open, `open · ${sm.due} still due`, ''], [sm.overdue, `overdue${sm.overdue_due ? ` · ${sm.overdue_due}` : ''}`, sm.overdue ? 'late' : ''],
     [paid.length, 'paid', 'paid'], [sm.customers, 'customers in the book', ''],
   ].map(([n, label, cls]) => `<span class="stat ${cls}"><b>${n ?? 0}</b>${esc(label)}</span>`).join('');
   const checked = d.rows.map(r => r.checked).filter(Boolean).sort().pop();
@@ -456,9 +533,13 @@ document.addEventListener('click', e => {
   if (t.matches('.approve, .reject')) return decide(t.dataset.id, t.dataset.approve === '1');
   if (t.matches('.run button')) return runJob(t.dataset.job, t);
   if (t.id === 'money-refresh') return refreshMoney();
+  if (t.id === 'money-csv') return exportInvoices();
+  if (t.dataset.nudge) return nudge(t.dataset.nudge, t);
+  if (t.dataset.go) return showTab(t.dataset.go);
   if (t.id === 'reset') { e.preventDefault(); if (confirm('Start over with a fresh copy of the demo?')) api('/api/reset', {}).then(() => location.reload()); }
 });
 $('#composer').addEventListener('submit', e => { e.preventDefault(); const v = $('#input').value; $('#input').value = ''; send(v); });
+$('#money-filter').addEventListener('input', e => { if (invoiceGrid) invoiceGrid.setGridOption('quickFilterText', e.target.value); });
 $('#add-customer').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target;

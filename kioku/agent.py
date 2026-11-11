@@ -335,6 +335,37 @@ class Kioku:
         self.audit.log('approval', 'approved', 'owner.decision', f'{aid} approved by the owner', tool=item['tool'])
         return done
 
+    def nudge(self, number: str, note: str = '') -> dict:
+        """The Nudge button on the Money tab: a payment reminder for one invoice, made into an approval card. Nothing
+        is sent here. The guard decides it exactly as it decides the model's send_reminder — PayPal's live status (no
+        reminder for a paid invoice), the demo's shared invoices, a note with an address refused — and only Approve on
+        the card sends it through PayPal. While a reminder card for the invoice waits, a second Nudge returns that card."""
+        rows = self.money.ledger.all()[::-1] if self.money.on else []  # newest first, as the guard's lookup reads them
+        row = next((r for r in rows if r.get('number') == number), None)
+        if row is None:
+            raise KeyError(f'no invoice #{number}')
+        waiting = self.pending_reminders().get(row['id'])
+        if waiting:
+            item = next(a for a in self.approvals.list() if a['id'] == waiting)
+            return dict(decision='ask', approval=waiting, reason=item['reason'], receipt=item.get('receipt', ''), again=True)
+        args = {'invoice': f'#{number}', **({'note': note} if str(note or '').strip() else {})}
+        decision = self.guard.check_tool(ToolCall(f'nudge-{number}', 'send_reminder', args), args, event='nudge')
+        if decision.action != 'ask':  # refused (a reminder never runs without a card)
+            return dict(decision=decision.action, rule=decision.rule, reason=decision.reason, receipt=decision.receipt)
+        aid = self.approvals.request('send_reminder', args, decision.reason, decision.receipt, origin='nudge')
+        return dict(decision='ask', approval=aid, rule=decision.rule, reason=decision.reason, receipt=decision.receipt)
+
+    def pending_reminders(self) -> dict[str, str]:
+        """{PayPal invoice id: approval id} for each reminder still waiting for the owner, however it was asked for."""
+        out = {}
+        for a in self.approvals.list():
+            if a['tool'] == 'send_reminder':
+                args = a.get('arguments') or {}
+                row, _ = self.money.ledger.find(str(args.get('invoice', '') or args.get('customer', '')))
+                if row:
+                    out.setdefault(row['id'], a['id'])
+        return out
+
     # ------------------------------------------------------------ money (PayPal), owner side
     def tools(self, only: set | None = None) -> list:
         """The tools offered to the model; with only, the tools that send, pay, bill or record are just those."""

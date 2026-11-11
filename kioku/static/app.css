@@ -214,3 +214,31 @@ tr.flash td { background: var(--ask-bg); }
 .count.late:not(:empty) { background: var(--block); }
 .badge.failed { background: var(--block-bg); color: var(--block); }
 .invoice-grid .ag-center-cols-viewport { min-height: 0 !important; }  /* autoHeight keeps room for an overlay otherwise */
+
+/* the invoice grid's bands (kioku/money.py overdue_band) — set by AG Grid's rowClassRules / cellClassRules, or by the plain
+   table's classes. Each band also says itself in words in the Overdue column, so colour is never the only sign. */
+:root { --late-bg: color-mix(in srgb, var(--block-bg) 55%, var(--panel)); }
+.od { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 600; line-height: 1.7; white-space: nowrap; }
+.od-late-long .od { background: var(--block); color: var(--panel); }
+.od-late .od { background: var(--block-bg); color: var(--block); }
+.od-soon .od { background: var(--ask-bg); color: var(--ask); }
+.od-open .od, .od-paid .od, .od-closed .od { color: var(--muted); font-weight: 400; padding: 0; }
+.due-late { color: var(--block); font-weight: 600; }
+.invoice-grid .ag-row.inv-late-long, .plain-invoices tr.inv-late-long td { background-color: var(--block-bg); }
+.invoice-grid .ag-row.inv-late, .plain-invoices tr.inv-late td { background-color: var(--late-bg); }
+.invoice-grid .ag-row.inv-paid, .invoice-grid .ag-row.inv-closed, .plain-invoices tr.inv-paid td, .plain-invoices tr.inv-closed td { color: var(--muted); }
+.invoice-grid .ag-row.inv-total .od { background: var(--block-bg); color: var(--block); }
+.plain-invoices tfoot td { background: var(--soft); font-weight: 600; }
+.plain-invoices tfoot .od { background: var(--block-bg); color: var(--block); }
+.nudge { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 0 10px; font-size: 12px; line-height: 1.9; white-space: nowrap; }
+.nudge:hover:not(:disabled) { border-color: var(--accent); }
+.nudge:disabled { opacity: .45; cursor: not-allowed; }
+.nudge.wait { background: var(--ask-bg); color: var(--ask); border-color: transparent; font-weight: 600; }
+.money-bar input[type="search"] { flex: 0 1 230px; min-width: 150px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 13px; }
+.money-bar input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.nudge-out { margin: 0 0 10px; font-size: 13px; }
+.nudge-out:empty { display: none; }
+.nudge-out.ask { color: var(--ask); } .nudge-out.block { color: var(--block); }
+.nudge-out button { border: 1px solid currentColor; background: none; color: inherit; border-radius: 8px; padding: 1px 9px; font-size: 12px; margin-left: 4px; }
+.invoice-grid .ag-cell[col-id="nudge"] { padding-left: 8px; padding-right: 8px; }

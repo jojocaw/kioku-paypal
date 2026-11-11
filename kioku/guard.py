@@ -351,11 +351,12 @@ class Approvals:
         tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding='utf-8')
         tmp.replace(self.path)
 
-    def request(self, tool: str, arguments: dict, reason: str, receipt: str) -> str:
+    def request(self, tool: str, arguments: dict, reason: str, receipt: str, origin: str = '') -> str:
+        """origin: where the request came from when it was not the model ('nudge': the owner's Nudge button)."""
         items = self._load()
         aid = f'A-{len(items) + 1:03d}'
         items.append(dict(id=aid, tool=tool, arguments=arguments, reason=reason, receipt=receipt, status='pending',
-                          created=self.clock().isoformat(timespec='seconds')))
+                          created=self.clock().isoformat(timespec='seconds'), **({'origin': origin} if origin else {})))
         self._save(items)
         return aid
 
@@ -444,9 +445,11 @@ class Guard:
 
     money = None  # kioku.money.Money when PayPal is connected (set by Kioku)
 
-    def check_tool(self, call: ToolCall, redacted_args: dict, context: str = '', only: set | None = None) -> Decision:
+    def check_tool(self, call: ToolCall, redacted_args: dict, context: str = '', only: set | None = None,
+                   event: str = 'tool_call') -> Decision:
         """only: set after Kioku asked the model again to use the tool for the owner's request — the actions that request
-        asks for. Then nothing else that sends, pays, bills or records can start (action.not_asked)."""
+        asks for. Then nothing else that sends, pays, bills or records can start (action.not_asked). event: what the
+        receipt calls it ('nudge' when the owner's Nudge button asked, not the model)."""
         off = self.not_asked(call, only, context) if only is not None and call.name in ACTIONS else ''
         if off:
             action, rule, reason = 'block', 'action.not_asked', off
@@ -464,7 +467,7 @@ class Guard:
                                                     context)
         # money reasons use the real names (and quote a note to the customer); the receipt keeps no personal data
         logged = self.redactor.redact(reason, Vault())[0] if call.name in INVOICE_TOOLS else reason
-        receipt = self.audit.log('tool_call', action, rule, logged, tool=call.name)
+        receipt = self.audit.log(event, action, rule, logged, tool=call.name)
         return Decision(action, rule, reason, receipt)
 
     def not_asked(self, call: ToolCall, only: set, context: str) -> str:
